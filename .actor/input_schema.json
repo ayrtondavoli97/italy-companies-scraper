@@ -1,0 +1,68 @@
+{
+    "title": "Italy Companies Scraper",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "regione": {
+            "title": "Regione",
+            "type": "string",
+            "description": "Regione italiana (obbligatoria se non si specifica la provincia). Scrape tutte le province della regione.",
+            "editor": "select",
+            "enum": ["", "ABRUZZO", "BASILICATA", "CALABRIA", "CAMPANIA", "EMILIA-ROMAGNA",
+                     "FRIULI-VENEZIA GIULIA", "LAZIO", "LIGURIA", "LOMBARDIA", "MARCHE",
+                     "MOLISE", "PIEMONTE", "PUGLIA", "SARDEGNA", "SICILIA", "TOSCANA",
+                     "TRENTINO-ALTO ADIGE", "UMBRIA", "VALLE D'AOSTA", "VENETO"],
+            "enumTitles": ["— nessuna —", "Abruzzo", "Basilicata", "Calabria", "Campania",
+                           "Emilia-Romagna", "Friuli-Venezia Giulia", "Lazio", "Liguria",
+                           "Lombardia", "Marche", "Molise", "Piemonte", "Puglia",
+                           "Sardegna", "Sicilia", "Toscana", "Trentino-Alto Adige",
+                           "Umbria", "Valle d'Aosta", "Veneto"],
+            "default": ""
+        },
+        "provincia": {
+            "title": "Provincia (opzionale)",
+            "type": "string",
+            "description": "Filtra per singola provincia. Usa nome completo (es. NAPOLI) o sigla (es. NA). Se specificata, sovrascrive la regione.",
+            "editor": "textfield",
+            "default": ""
+        },
+        "ateco": {
+            "title": "Codice ATECO (opzionale)",
+            "type": "string",
+            "description": "Filtra per codice ATECO. Può essere parziale (es. '41' per costruzioni, '56' per ristorazione).",
+            "editor": "textfield",
+            "default": ""
+        },
+        "formaGiuridica": {
+            "title": "Forma Giuridica (opzionale)",
+            "type": "string",
+            "description": "Es: SRL, SPA, DITTA INDIVIDUALE, SNC, SAS, COOPERATIVE",
+            "editor": "textfield",
+            "default": ""
+        },
+        "statoImpresa": {
+            "title": "Stato impresa",
+            "type": "string",
+            "description": "Filtra per stato dell'impresa",
+            "editor": "select",
+            "enum": ["ATTIVA", "INATTIVA", "CESSATA", ""],
+            "enumTitles": ["Attiva", "Inattiva", "Cessata", "Tutte"],
+            "default": "ATTIVA"
+        },
+        "maxItems": {
+            "title": "Max risultati",
+            "type": "integer",
+            "description": "Numero massimo di aziende da restituire",
+            "default": 5000,
+            "minimum": 1,
+            "maximum": 100000
+        },
+        "proxyConfig": {
+            "title": "Proxy configuration",
+            "type": "object",
+            "description": "Configurazione proxy Apify",
+            "editor": "proxy",
+            "default": { "useApifyProxy": true }
+        }
+    }
+}
