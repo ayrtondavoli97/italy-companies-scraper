@@ -1,0 +1,43 @@
+{
+    "actorSpecification": 1,
+    "name": "italy-companies-scraper",
+    "title": "Italy Companies Scraper — Search by Region & Province",
+    "description": "Extract Italian company data by geographic area (region/province). Optional filters: ATECO code, legal form, company status. Returns company name, address, P.IVA, ATECO, contacts and more.",
+    "version": "1.0",
+    "buildTag": "latest",
+    "dockerfile": "./Dockerfile",
+    "input": "./input_schema.json",
+    "storages": {
+        "dataset": {
+            "actorSpecification": 1,
+            "title": "Italian Companies",
+            "views": {
+                "overview": {
+                    "title": "Overview",
+                    "transformation": {
+                        "fields": ["ragioneSociale","piva","indirizzo","comune","provincia","ateco","descrizioneAteco","formaGiuridica","stato","telefono","email","pec","website","detailUrl"]
+                    },
+                    "display": {
+                        "component": "table",
+                        "properties": {
+                            "ragioneSociale": { "label": "Ragione Sociale", "format": "text" },
+                            "piva": { "label": "P.IVA", "format": "text" },
+                            "indirizzo": { "label": "Indirizzo", "format": "text" },
+                            "comune": { "label": "Comune", "format": "text" },
+                            "provincia": { "label": "Provincia", "format": "text" },
+                            "ateco": { "label": "ATECO", "format": "text" },
+                            "descrizioneAteco": { "label": "Settore", "format": "text" },
+                            "formaGiuridica": { "label": "Forma Giuridica", "format": "text" },
+                            "stato": { "label": "Stato", "format": "text" },
+                            "telefono": { "label": "Telefono", "format": "text" },
+                            "email": { "label": "Email", "format": "text" },
+                            "pec": { "label": "PEC", "format": "text" },
+                            "website": { "label": "Website", "format": "link" },
+                            "detailUrl": { "label": "Scheda", "format": "link" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
