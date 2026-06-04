@@ -113,7 +113,24 @@ const crawler = new PlaywrightCrawler({
 
         if (isFirst) {
             await page.goto(`${BASE}/home`, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-            await page.waitForTimeout(1500);
+            await page.waitForTimeout(2000);
+
+            // Dismiss Didomi cookie banner
+            try {
+                const didomiBtn = page.locator('#didomi-notice-agree-button, button[id*="didomi"][id*="agree"], button:has-text("Accetta")').first();
+                if (await didomiBtn.isVisible({ timeout: 4000 })) {
+                    await didomiBtn.click();
+                    await page.waitForTimeout(1000);
+                    log.info('Didomi cookie dismissed');
+                }
+            } catch {
+                // Try hiding via JS if button click fails
+                await page.evaluate(() => {
+                    const host = document.getElementById('didomi-host');
+                    if (host) host.style.display = 'none';
+                }).catch(() => {});
+                log.info('Didomi hidden via JS');
+            }
 
             // Save debug HTML on first run
             if (collected === 0) {
@@ -215,7 +232,8 @@ const crawler = new PlaywrightCrawler({
             }).filter(Boolean);
 
             // Next page
-            const nextEl = document.querySelector('a[rel="next"], a.next, [class*="next"]:not([disabled]), a:has-text("Successiva")');
+            const nextEl = document.querySelector('a[rel="next"], a.next') ||
+                [...document.querySelectorAll('a')].find(a => /successiv/i.test(a.textContent));
             const nextUrl = nextEl?.href || null;
 
             return { items, nextUrl, total };
