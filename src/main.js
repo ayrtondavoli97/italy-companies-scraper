@@ -89,11 +89,15 @@ console.log(`Province: ${provinceCodes.join(', ')} | ATECO: ${ateco||'tutti'} | 
 
 let collected = 0;
 
-// Build one start URL per province — registroimprese.it search page
-const startUrls = provinceCodes.map(prov => ({
-    url: `${BASE}/ricerca-imprese`,
-    userData: { prov, page: 1, isFirst: true },
-}));
+// Build start URLs — one per province letter combination (A-Z x province)
+const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+const startUrls = provinceCodes.flatMap(prov =>
+    LETTERS.map(letter => ({
+        url: `${BASE}/ricercaext?denominazione=${letter}&provincia=${encodeURIComponent(prov)}&ateco=${encodeURIComponent(ateco)}&pagina=1`,
+        userData: { prov, page: 1, letter, isFirst: false },
+    }))
+);
+console.log(`Total search requests queued: ${startUrls.length}`);
 
 const crawler = new PlaywrightCrawler({
     proxyConfiguration,
@@ -108,29 +112,16 @@ const crawler = new PlaywrightCrawler({
     ],
 
     async requestHandler({ page, request, log, addRequests }) {
-        const { prov, page: pageNum, isFirst } = request.userData;
-        log.info(`Provincia=${prov} page=${pageNum}`);
+        const { prov, page: pageNum, letter = '' } = request.userData;
+        log.info(`Provincia=${prov} letter=${letter} page=${pageNum}`);
 
-        if (isFirst) {
-            // registroimprese.it requires a search term — iterate over alphabet letters
-            // Queue all 26 letters for this province
-            const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
-            const letterRequests = letters.map(letter => ({
-                url: `${BASE}/ricercaext?denominazione=${letter}&provincia=${encodeURIComponent(prov)}&ateco=${encodeURIComponent(ateco)}&pagina=1`,
-                userData: { prov, page: 1, letter, isFirst: false },
-            }));
-            await addRequests(letterRequests);
-            log.info(`Queued ${letterRequests.length} letter searches for prov=${prov}`);
-            return; // Don't process this page further
-        } else {
-            await page.goto(request.url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-            await page.waitForTimeout(1500);
-            // Dismiss Didomi if present
-            await page.evaluate(() => {
-                const host = document.getElementById('didomi-host');
-                if (host) host.style.display = 'none';
-            }).catch(() => {});
-        }
+        await page.goto(request.url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+        await page.waitForTimeout(1500);
+        // Dismiss Didomi if present
+        await page.evaluate(() => {
+            const host = document.getElementById('didomi-host');
+            if (host) host.style.display = 'none';
+        }).catch(() => {});
 
         await page.waitForTimeout(1000);
 
