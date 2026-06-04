@@ -90,7 +90,8 @@ for (const prov of provinceCodes) {
     let total = Infinity;
 
     while (collected < maxItems && skip < total) {
-        const url = `https://imprese.openapi.it/advance?provincia=${prov}&limit=100&skip=${skip}${ateco ? `&codice_ateco=${ateco}` : ''}`;
+        // OpenCorporates: free API, no key, Italy jurisdiction, filter by registered_address
+        const url = `https://api.opencorporates.com/v0.4/companies/search?jurisdiction_code=it&registered_address=${encodeURIComponent(prov)}&inactive=false&per_page=100&page=${Math.floor(skip/100)+1}`;
         console.log(`API call: ${url}`);
 
         try {
@@ -105,37 +106,39 @@ for (const prov of provinceCodes) {
             await Actor.setValue(`debug_api_${prov}_skip${skip}`, json);
             console.log(`API response keys: ${Object.keys(json).join(', ')}`);
 
-            if (json.items || json.companies || json.data || Array.isArray(json)) {
+            // OpenCorporates response format
+            if (json.results?.companies) {
                 apiWorked = true;
-                const items = json.items || json.companies || json.data || json;
-                total = json.total || json.count || json.meta?.total || items.length;
-                console.log(`Got ${items.length} companies, total=${total}`);
+                const companies = json.results.companies;
+                total = json.results.total_count || companies.length;
+                console.log(`Got ${companies.length} companies, total=${total}`);
 
-                for (const c of items) {
+                for (const wrapper of companies) {
                     if (collected >= maxItems) break;
+                    const c = wrapper.company || wrapper;
+                    const addr = c.registered_address;
                     await Actor.pushData({
-                        ragioneSociale: c.denominazione || c.name || c.ragioneSociale || '',
-                        cf: c.codice_fiscale || c.cf || '',
-                        piva: c.partita_iva || c.piva || c.vat || '',
-                        indirizzo: c.indirizzo || c.address || '',
-                        comune: c.comune || c.city || c.municipality || '',
-                        provincia: c.provincia || prov,
-                        cap: c.cap || c.zip || '',
-                        ateco: c.codice_ateco || c.ateco || '',
-                        descrizioneAteco: c.descrizione_ateco || c.attivita || '',
-                        formaGiuridica: c.natura_giuridica || c.forma_giuridica || c.legalForm || '',
-                        stato: c.stato || c.status || '',
-                        pec: c.pec || '',
-                        email: c.email || '',
-                        telefono: c.telefono || c.phone || '',
+                        ragioneSociale: c.name || '',
+                        cf: c.company_number || '',
+                        piva: c.company_number || '',
+                        indirizzo: addr ? [addr.street_address, addr.locality].filter(Boolean).join(', ') : '',
+                        comune: addr?.locality || '',
+                        provincia: addr?.region || prov,
+                        cap: addr?.postal_code || '',
+                        ateco: '',
+                        descrizioneAteco: c.industry_codes?.[0]?.description || '',
+                        formaGiuridica: c.company_type || '',
+                        stato: c.current_status || (c.inactive ? 'CESSATA' : 'ATTIVA'),
+                        dataIscrizione: c.incorporation_date || '',
+                        detailUrl: c.opencorporates_url || '',
                         _provincia: prov,
                         _regione: regioneUp,
-                        _source: 'openapi.it',
+                        _source: 'opencorporates',
                     });
                     collected++;
                 }
                 skip += 100;
-                if (items.length === 0) break;
+                if (companies.length === 0) break;
             } else {
                 console.log(`Unexpected API response: ${JSON.stringify(json).substring(0, 200)}`);
                 break;
@@ -154,7 +157,7 @@ if (!apiWorked && collected === 0) {
 
     // Target: imprese.info — public Italian company directory
     const startUrls = provinceCodes.map(prov => ({
-        url: `https://www.imprese.info/imprese/provincia/${prov.toLowerCase()}/`,
+        url: `https://www.registroaziende.it/ricerca?q=${prov}&page=1`,
         userData: { prov, page: 1 },
     }));
 
