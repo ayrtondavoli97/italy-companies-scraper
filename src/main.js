@@ -140,20 +140,23 @@ const crawler = new PlaywrightCrawler({
                 log.info(`Home preview:\n${txt}`);
             }
 
-            // Fill search form: leave name empty, select province
+            // Fill search form: select province by full name
+            // Reverse map: BA -> BARI
+            const PROV_FULL = Object.fromEntries(Object.entries(PROVINCE_MAP).map(([k,v]) => [v,k]));
+            const provFullName = PROV_FULL[prov] || prov;
             try {
-                // Set province in dropdown
-                const provSel = page.locator('select[name*="provincia"], select[id*="provincia"], #provincia').first();
+                const provSel = page.locator('select').filter({ hasText: 'Tutta Italia' }).first();
                 if (await provSel.isVisible({ timeout: 3000 })) {
-                    await provSel.selectOption(prov);
-                    log.info(`Province selected: ${prov}`);
-                } else {
-                    // Try text input
-                    const provInput = page.locator('input[name*="provincia"], input[placeholder*="provincia"]').first();
-                    if (await provInput.isVisible({ timeout: 3000 })) {
-                        await provInput.fill(prov);
-                        log.info(`Province typed: ${prov}`);
-                    }
+                    // Try by label text first
+                    await provSel.selectOption({ label: provFullName }).catch(async () => {
+                        // Try by value
+                        await provSel.selectOption(prov).catch(async () => {
+                            // Try partial match
+                            await provSel.selectOption({ label: prov });
+                        });
+                    });
+                    const selected = await provSel.evaluate(el => el.options[el.selectedIndex]?.text);
+                    log.info(`Province selected: "${selected}"`);
                 }
             } catch(e) {
                 log.warning(`Could not set province: ${e.message}`);
@@ -170,14 +173,25 @@ const crawler = new PlaywrightCrawler({
                 } catch { /* ignore */ }
             }
 
-            // Submit
+            // Submit — use force:true to bypass overlay issues
             try {
-                const submitBtn = page.locator('button[type="submit"], input[type="submit"], .btn-cerca, button:has-text("Cerca"), button:has-text("CERCA")').first();
-                if (await submitBtn.isVisible({ timeout: 3000 })) {
-                    await submitBtn.click();
-                    await page.waitForLoadState('domcontentloaded', { timeout: 20_000 });
-                    log.info('Form submitted');
+                // Try desktop search button first (not mobile)
+                const submitBtn = page.locator('#btnCercaGratuitaDesk, .buttonCerca:not(.btnCercaGratuitaMob), button[onclick*="submitCaptchaCerca"]:not([id*="Mob"])').first();
+                const isBtnVisible = await submitBtn.isVisible({ timeout: 2000 }).catch(() => false);
+                if (isBtnVisible) {
+                    await submitBtn.click({ force: true });
+                    log.info('Clicked desktop search button (force)');
+                } else {
+                    // Fallback: JS click on form submit
+                    await page.evaluate(() => {
+                        const btn = document.querySelector('#btnCercaGratuitaDesk') ||
+                                    document.querySelector('button[onclick*="submitCaptchaCerca"]');
+                        if (btn) btn.click();
+                    });
+                    log.info('Clicked submit via JS');
                 }
+                await page.waitForLoadState('domcontentloaded', { timeout: 20_000 });
+                log.info(`After submit URL: ${page.url()}`);
             } catch(e) {
                 log.warning(`Submit error: ${e.message}`);
             }
