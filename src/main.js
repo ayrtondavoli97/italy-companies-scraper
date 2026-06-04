@@ -112,95 +112,27 @@ const crawler = new PlaywrightCrawler({
         log.info(`Provincia=${prov} page=${pageNum}`);
 
         if (isFirst) {
-            await page.goto(`${BASE}/home`, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+            // Navigate directly to search results URL with province parameter
+            // registroimprese.it accepts GET params for search
+            const searchUrl = `${BASE}/ricerca-libera?denomin=&prov=${encodeURIComponent(prov)}&natura=&rea=&cf=&indirizzo=&comune=&cap=&ateco=${encodeURIComponent(ateco)}&paginaRisultati=1`;
+            log.info(`Navigating to search URL: ${searchUrl}`);
+            await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
             await page.waitForTimeout(2000);
 
-            // Dismiss Didomi cookie banner
+            // Dismiss Didomi if present
             try {
-                const didomiBtn = page.locator('#didomi-notice-agree-button, button[id*="didomi"][id*="agree"], button:has-text("Accetta")').first();
-                if (await didomiBtn.isVisible({ timeout: 4000 })) {
-                    await didomiBtn.click();
-                    await page.waitForTimeout(1000);
-                    log.info('Didomi cookie dismissed');
-                }
-            } catch {
-                // Try hiding via JS if button click fails
                 await page.evaluate(() => {
                     const host = document.getElementById('didomi-host');
                     if (host) host.style.display = 'none';
-                }).catch(() => {});
-                log.info('Didomi hidden via JS');
-            }
+                });
+            } catch { /* ignore */ }
 
-            // Save debug HTML on first run
-            if (collected === 0) {
-                const html = await page.content();
-                await Actor.setValue('debug_home', html, { contentType: 'text/html' });
-                const txt = await page.evaluate(() => document.body.innerText.substring(0, 600));
-                log.info(`Home preview:\n${txt}`);
-            }
-
-            // Fill search form: select province by full name
-            // Reverse map: BA -> BARI
-            const PROV_FULL = Object.fromEntries(Object.entries(PROVINCE_MAP).map(([k,v]) => [v,k]));
-            const provFullName = PROV_FULL[prov] || prov;
-            try {
-                const provSel = page.locator('select').filter({ hasText: 'Tutta Italia' }).first();
-                if (await provSel.isVisible({ timeout: 3000 })) {
-                    // Try by label text first
-                    await provSel.selectOption({ label: provFullName }).catch(async () => {
-                        // Try by value
-                        await provSel.selectOption(prov).catch(async () => {
-                            // Try partial match
-                            await provSel.selectOption({ label: prov });
-                        });
-                    });
-                    const selected = await provSel.evaluate(el => el.options[el.selectedIndex]?.text);
-                    log.info(`Province selected: "${selected}"`);
-                }
-            } catch(e) {
-                log.warning(`Could not set province: ${e.message}`);
-            }
-
-            // ATECO filter if provided
-            if (ateco) {
-                try {
-                    const atecoInput = page.locator('input[name*="ateco"], input[placeholder*="ateco"], input[id*="ateco"]').first();
-                    if (await atecoInput.isVisible({ timeout: 2000 })) {
-                        await atecoInput.fill(ateco);
-                        log.info(`ATECO filled: ${ateco}`);
-                    }
-                } catch { /* ignore */ }
-            }
-
-            // Submit — use force:true to bypass overlay issues
-            try {
-                // Try desktop search button first (not mobile)
-                const submitBtn = page.locator('#btnCercaGratuitaDesk, .buttonCerca:not(.btnCercaGratuitaMob), button[onclick*="submitCaptchaCerca"]:not([id*="Mob"])').first();
-                const isBtnVisible = await submitBtn.isVisible({ timeout: 2000 }).catch(() => false);
-                if (isBtnVisible) {
-                    await submitBtn.click({ force: true });
-                    log.info('Clicked desktop search button (force)');
-                } else {
-                    // Fallback: JS click on form submit
-                    await page.evaluate(() => {
-                        const btn = document.querySelector('#btnCercaGratuitaDesk') ||
-                                    document.querySelector('button[onclick*="submitCaptchaCerca"]');
-                        if (btn) btn.click();
-                    });
-                    log.info('Clicked submit via JS');
-                }
-                await page.waitForLoadState('domcontentloaded', { timeout: 20_000 });
-                log.info(`After submit URL: ${page.url()}`);
-            } catch(e) {
-                log.warning(`Submit error: ${e.message}`);
-            }
-
-            // Save results HTML
+            // Save debug HTML
             if (collected === 0) {
                 const html = await page.content();
                 await Actor.setValue(`debug_results_${prov}`, html, { contentType: 'text/html' });
-                log.info(`Results HTML saved: debug_results_${prov}`);
+                const txt = await page.evaluate(() => document.body.innerText.substring(0, 800));
+                log.info(`Search page preview:\n${txt}`);
             }
         } else {
             await page.goto(request.url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
