@@ -1,13 +1,17 @@
 /**
- * Italy Companies Scraper v2
- * Source: infoimprese.it (InfoCamere — public, no login, search by province)
- * Input: regione or provincia (required) + ateco, formaGiuridica, stato (optional)
+ * Italy Companies Scraper
+ * Source: registroimprese.it — official Italian business registry
+ * Input: provincia (required), ateco (optional), forma_giuridica (optional)
+ * Output: ragione sociale, provincia, indirizzo, ateco, forma giuridica, CF/PIVA, stato
  */
 
 import { Actor } from 'apify';
 import { PlaywrightCrawler } from 'crawlee';
 
-const PROVINCE = {
+const BASE = 'https://www.registroimprese.it';
+
+// Province italiane
+const PROVINCE_MAP = {
     'AGRIGENTO':'AG','ALESSANDRIA':'AL','ANCONA':'AN','AOSTA':'AO','AREZZO':'AR',
     'ASCOLI PICENO':'AP','ASTI':'AT','AVELLINO':'AV','BARI':'BA','BARLETTA-ANDRIA-TRANI':'BT',
     'BELLUNO':'BL','BENEVENTO':'BN','BERGAMO':'BG','BIELLA':'BI','BOLOGNA':'BO',
@@ -47,159 +51,177 @@ const REGIONE_PROVINCE = {
     "VALLE D'AOSTA":['AO'],'VENETO':['BL','PD','RO','TV','VE','VR','VI'],
 };
 
-// infoimprese.it search: leave denominazione empty, set only provincia
-// URL: https://www.infoimprese.it/iimprese/action/ricerca.do
-// POST params: denominazione=&provincia=NA&ateco=&formaGiuridica=&stato=A&submit=Cerca
-const BASE = 'https://www.infoimprese.it';
-
 await Actor.init();
 
 const input = await Actor.getInput() ?? {};
 const {
-    regione = '', provincia = '', ateco = '',
-    formaGiuridica = '', statoImpresa = 'A', // A=attiva, I=inattiva, C=cessata, ''=tutte
-    maxItems = 5000, proxyConfig: proxyConfigInput,
+    regione = '',
+    provincia = '',
+    ateco = '',
+    formaGiuridica = '',
+    statoImpresa = 'ATTIVA',
+    maxItems = 5000,
+    proxyConfig: proxyConfigInput,
 } = input;
 
+// Resolve province codes
 let provinceCodes = [];
 const regioneUp = regione.toUpperCase().trim();
 const provinciaUp = provincia.toUpperCase().trim();
 
 if (provinciaUp) {
-    const code = PROVINCE[provinciaUp] || (Object.values(PROVINCE).includes(provinciaUp) ? provinciaUp : null);
+    const code = PROVINCE_MAP[provinciaUp] || (Object.values(PROVINCE_MAP).includes(provinciaUp) ? provinciaUp : null);
     if (!code) { console.error(`Provincia non riconosciuta: "${provincia}"`); await Actor.exit(1); }
     provinceCodes = [code];
 } else if (regioneUp) {
     provinceCodes = REGIONE_PROVINCE[regioneUp];
     if (!provinceCodes) { console.error(`Regione non riconosciuta: "${regione}"`); await Actor.exit(1); }
 } else {
-    console.error('Obbligatorio: "regione" o "provincia"'); await Actor.exit(1);
+    console.error('Input obbligatorio: inserisci "regione" o "provincia"');
+    await Actor.exit(1);
 }
 
-const proxyConfiguration = proxyConfigInput ? await Actor.createProxyConfiguration(proxyConfigInput) : undefined;
-console.log(`Province: ${provinceCodes.join(', ')} | ATECO: ${ateco||'tutti'} | Stato: ${statoImpresa||'tutti'}`);
+const proxyConfiguration = proxyConfigInput
+    ? await Actor.createProxyConfiguration(proxyConfigInput)
+    : undefined;
+
+console.log(`Province: ${provinceCodes.join(', ')} | ATECO: ${ateco||'tutti'} | Stato: ${statoImpresa}`);
 
 let collected = 0;
 
-// Build one start URL per province — POST form via GET-equivalent
-// infoimprese.it supports GET with query params
+// Build one start URL per province — registroimprese.it search page
 const startUrls = provinceCodes.map(prov => ({
-    url: `${BASE}/iimprese/action/ricerca.do`,
+    url: `${BASE}/ricerca-imprese`,
     userData: { prov, page: 1, isFirst: true },
-    method: 'GET',
 }));
 
 const crawler = new PlaywrightCrawler({
     proxyConfiguration,
     launchContext: { launchOptions: { headless: true } },
     requestHandlerTimeoutSecs: 120,
-    maxConcurrency: 2,
+    maxConcurrency: 1, // single to avoid detection
+    navigationTimeoutSecs: 45,
+    preNavigationHooks: [
+        async (_ctx, gotoOptions) => {
+            gotoOptions.waitUntil = 'domcontentloaded';
+        },
+    ],
 
     async requestHandler({ page, request, log, addRequests }) {
         const { prov, page: pageNum, isFirst } = request.userData;
-        log.info(`Scraping provincia=${prov} page=${pageNum}`);
+        log.info(`Provincia=${prov} page=${pageNum}`);
 
         if (isFirst) {
-            // Navigate to search page and fill the form
-            await page.goto(`${BASE}/iimprese/action/ricerca.do`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+            await page.goto(`${BASE}/home`, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+            await page.waitForTimeout(1500);
 
-            // Wait for form
-            await page.waitForSelector('form, input[name="provincia"], select[name="provincia"]', { timeout: 20_000 }).catch(() => {});
-
-            // Debug: save first page HTML
-            if (prov === provinceCodes[0]) {
+            // Save debug HTML on first run
+            if (collected === 0) {
                 const html = await page.content();
-                await Actor.setValue('debug_search_page', html, { contentType: 'text/html' });
+                await Actor.setValue('debug_home', html, { contentType: 'text/html' });
                 const txt = await page.evaluate(() => document.body.innerText.substring(0, 600));
-                log.info(`Search page preview:\n${txt}`);
+                log.info(`Home preview:\n${txt}`);
             }
 
-            // Fill province
+            // Fill search form: leave name empty, select province
             try {
-                const provSel = page.locator('select[name="provincia"]').first();
+                // Set province in dropdown
+                const provSel = page.locator('select[name*="provincia"], select[id*="provincia"], #provincia').first();
                 if (await provSel.isVisible({ timeout: 3000 })) {
                     await provSel.selectOption(prov);
-                    log.info(`Province selected via dropdown: ${prov}`);
+                    log.info(`Province selected: ${prov}`);
                 } else {
-                    await page.locator('input[name="provincia"]').first().fill(prov);
-                    log.info(`Province filled via input: ${prov}`);
+                    // Try text input
+                    const provInput = page.locator('input[name*="provincia"], input[placeholder*="provincia"]').first();
+                    if (await provInput.isVisible({ timeout: 3000 })) {
+                        await provInput.fill(prov);
+                        log.info(`Province typed: ${prov}`);
+                    }
                 }
-            } catch { log.warning('Could not fill province field'); }
+            } catch(e) {
+                log.warning(`Could not set province: ${e.message}`);
+            }
 
-            // Fill optional ATECO
+            // ATECO filter if provided
             if (ateco) {
-                await page.locator('input[name="ateco"], select[name="ateco"]').first().fill(ateco).catch(() => {});
-            }
-
-            // Fill optional forma giuridica
-            if (formaGiuridica) {
-                await page.locator('select[name="formaGiuridica"], input[name="formaGiuridica"]').first()
-                    .fill(formaGiuridica).catch(() => {});
-            }
-
-            // Fill stato
-            if (statoImpresa) {
                 try {
-                    await page.locator('select[name="stato"]').first().selectOption(statoImpresa).catch(() => {});
+                    const atecoInput = page.locator('input[name*="ateco"], input[placeholder*="ateco"], input[id*="ateco"]').first();
+                    if (await atecoInput.isVisible({ timeout: 2000 })) {
+                        await atecoInput.fill(ateco);
+                        log.info(`ATECO filled: ${ateco}`);
+                    }
                 } catch { /* ignore */ }
             }
 
             // Submit
-            await page.locator('input[type="submit"], button[type="submit"]').first().click().catch(async () => {
-                await page.evaluate(() => document.querySelector('form')?.submit());
-            });
-            await page.waitForLoadState('domcontentloaded', { timeout: 30_000 });
-            log.info('Form submitted');
-        } else {
-            await page.goto(request.url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-        }
-
-        // Save HTML for debugging on first run
-        if (pageNum === 1 && prov === provinceCodes[0]) {
-            const html = await page.content();
-            await Actor.setValue(`debug_results_${prov}`, html, { contentType: 'text/html' });
-            log.info(`Results HTML saved: debug_results_${prov}`);
-        }
-
-        const bodyTxt = await page.evaluate(() => document.body.innerText.substring(0, 800));
-        log.info(`Page body preview:\n${bodyTxt}`);
-
-        const { items, nextUrl, total } = await page.evaluate(() => {
-            const g = (el, ...sels) => { for (const s of sels) { const f = el?.querySelector(s); if (f) return f.textContent.trim(); } return ''; };
-
-            // Total results
-            let total = 0;
-            const totEl = document.querySelector('[class*="totale"], [class*="risultati"], [class*="total"]');
-            if (totEl) { const m = totEl.textContent.match(/(\d[\d.]*)/); if (m) total = parseInt(m[1].replace(/\./g, ''), 10); }
-
-            // Company rows — table-based layout common on infoimprese.it
-            let items = [];
-            const rows = [...document.querySelectorAll('table tbody tr, .risultato, [class*="impresa-row"], [class*="company-row"]')];
-            for (const row of rows) {
-                const cells = [...row.querySelectorAll('td')].map(td => td.textContent.trim());
-                const name = g(row, '.denominazione', '.ragione-sociale', 'td:first-child', 'strong') || cells[0] || '';
-                if (!name || name.length < 2) continue;
-                const link = row.querySelector('a');
-                items.push({
-                    ragioneSociale: name,
-                    comune: cells[1] || g(row, '.comune', '.localita') || '',
-                    provincia: cells[2] || g(row, '.provincia') || '',
-                    indirizzo: cells[3] || g(row, '.indirizzo', '.sede') || '',
-                    formaGiuridica: cells[4] || g(row, '.forma-giuridica', '.tipo') || '',
-                    ateco: cells[5] || g(row, '.ateco') || '',
-                    stato: cells[6] || g(row, '.stato') || '',
-                    detailUrl: link?.href || '',
-                });
+            try {
+                const submitBtn = page.locator('button[type="submit"], input[type="submit"], .btn-cerca, button:has-text("Cerca"), button:has-text("CERCA")').first();
+                if (await submitBtn.isVisible({ timeout: 3000 })) {
+                    await submitBtn.click();
+                    await page.waitForLoadState('domcontentloaded', { timeout: 20_000 });
+                    log.info('Form submitted');
+                }
+            } catch(e) {
+                log.warning(`Submit error: ${e.message}`);
             }
 
-            // Next page link
-            const nextEl = document.querySelector('a[href*="pagina"], a.next, a:has-text("Successiva"), a:has-text("›"), .pagination a:last-child');
+            // Save results HTML
+            if (collected === 0) {
+                const html = await page.content();
+                await Actor.setValue(`debug_results_${prov}`, html, { contentType: 'text/html' });
+                log.info(`Results HTML saved: debug_results_${prov}`);
+            }
+        } else {
+            await page.goto(request.url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+        }
+
+        await page.waitForTimeout(1000);
+
+        // Preview page text
+        const txt = await page.evaluate(() => document.body.innerText.substring(0, 600));
+        log.info(`Page preview:\n${txt}`);
+
+        // Parse results
+        const { items, nextUrl, total } = await page.evaluate(() => {
+            const g = (el, ...sels) => {
+                for (const s of sels) { try { const f = el.querySelector(s); if (f) return f.textContent.trim(); } catch {} }
+                return '';
+            };
+
+            // Total count
+            let total = 0;
+            const totEl = document.querySelector('[class*="totale"], [class*="risultati"], [class*="total"], [class*="count"]');
+            if (totEl) { const m = totEl.textContent.match(/(\d[\d.]*)/); if (m) total = parseInt(m[1].replace(/\./g,''),10); }
+
+            // Result rows — registroimprese.it typically uses table or list layout
+            const rows = [...document.querySelectorAll('table tbody tr, .risultato, [class*="impresa-row"], [class*="company-row"], .row-impresa')];
+
+            const items = rows.map(row => {
+                const cells = [...row.querySelectorAll('td')].map(td => td.textContent.trim());
+                const name = g(row, '.denominazione', '.ragione-sociale', 'td:first-child', 'strong', 'b') || cells[0] || '';
+                if (!name || name.length < 2) return null;
+                const link = row.querySelector('a');
+                return {
+                    ragioneSociale: name,
+                    provincia: cells[1] || g(row, '.provincia') || '',
+                    comune: cells[2] || g(row, '.comune', '.localita') || '',
+                    indirizzo: cells[3] || g(row, '.indirizzo', '.sede') || '',
+                    ateco: cells[4] || g(row, '.ateco', '.attivita') || '',
+                    formaGiuridica: cells[5] || g(row, '.forma-giuridica', '.tipo') || '',
+                    stato: g(row, '.stato', '.status') || '',
+                    cf: g(row, '.cf', '.codice-fiscale', '.piva') || '',
+                    detailUrl: link?.href || '',
+                };
+            }).filter(Boolean);
+
+            // Next page
+            const nextEl = document.querySelector('a[rel="next"], a.next, [class*="next"]:not([disabled]), a:has-text("Successiva")');
             const nextUrl = nextEl?.href || null;
 
             return { items, nextUrl, total };
         });
 
-        log.info(`prov=${prov} pg=${pageNum}: ${items.length} items | total=${total} | next=${nextUrl ? 'yes' : 'no'}`);
+        log.info(`Prov=${prov} pg=${pageNum}: ${items.length} companies | total=${total}`);
 
         for (const item of items) {
             if (collected >= maxItems) break;
