@@ -1,13 +1,11 @@
 /**
- * Italy Companies Scraper v3
- * Source: atoka.io — web scraping (no API key needed for public data)
- * Filter by: provincia/regione (required), ateco, forma giuridica
+ * Italy Companies Scraper v4
+ * Source: imprese.openapi.it — free API, 100 req/day no token
+ * Fallback: Playwright scraping of company directories
  */
 
 import { Actor } from 'apify';
 import { PlaywrightCrawler } from 'crawlee';
-
-const BASE = 'https://atoka.io';
 
 const PROVINCE_CODES = {
     'AGRIGENTO':'AG','ALESSANDRIA':'AL','ANCONA':'AN','AOSTA':'AO','AREZZO':'AR',
@@ -79,174 +77,148 @@ const proxyConfiguration = proxyConfigInput
 
 console.log(`Province: ${provinceCodes.join(', ')} | ATECO: ${ateco||'tutti'}`);
 
-// Atoka URL: /it/aziende/?province=BA&active=true&offset=0
-// province param uses sigla (BA, NA, etc.)
-const buildUrl = (prov, offset = 0) => {
-    const params = new URLSearchParams();
-    params.set('province', prov);
-    if (statoImpresa === 'attiva') params.set('active', 'true');
-    if (ateco) params.set('ateco', ateco);
-    if (formaGiuridica) params.set('legalForm', formaGiuridica);
-    params.set('offset', offset);
-    return `${BASE}/it/aziende/?${params.toString()}`;
-};
-
-const startUrls = provinceCodes.map(prov => ({
-    url: buildUrl(prov, 0),
-    userData: { prov, offset: 0 },
-}));
+// ── Strategy 1: Try openapi.it JSON API (100 free req/day) ───────────────────
+// Endpoint: GET https://imprese.openapi.it/advance?provincia=BA&limit=100&skip=0
+// No token required for first 100 requests
 
 let collected = 0;
+let apiWorked = false;
 
-const crawler = new PlaywrightCrawler({
-    proxyConfiguration,
-    launchContext: { launchOptions: { headless: true } },
-    requestHandlerTimeoutSecs: 120,
-    maxConcurrency: 1,
-    navigationTimeoutSecs: 45,
-    preNavigationHooks: [
-        async (_ctx, gotoOptions) => { gotoOptions.waitUntil = 'domcontentloaded'; },
-    ],
+for (const prov of provinceCodes) {
+    if (collected >= maxItems) break;
+    let skip = 0;
+    let total = Infinity;
 
-    async requestHandler({ page, request, log, addRequests }) {
-        const { prov, offset } = request.userData;
-        log.info(`Prov=${prov} offset=${offset} | ${request.url}`);
+    while (collected < maxItems && skip < total) {
+        const url = `https://imprese.openapi.it/advance?provincia=${prov}&limit=100&skip=${skip}${ateco ? `&codice_ateco=${ateco}` : ''}`;
+        console.log(`API call: ${url}`);
 
-        // Intercept API responses — atoka uses internal API
-        const apiCompanies = [];
-        page.on('response', async response => {
-            const url = response.url();
-            const ct = response.headers()['content-type'] || '';
-            if (!ct.includes('json')) return;
-            if (!url.includes('/api/') && !url.includes('companies') && !url.includes('aziende')) return;
-            try {
-                const json = await response.json();
-                const companies = extractCompanies(json);
-                if (companies.length > 0) {
-                    apiCompanies.push(...companies);
-                    log.info(`API: ${url.substring(0,80)} → ${companies.length} companies`);
+        try {
+            const { createPlaywrightRouter } = await import('crawlee');
+            // Use fetch via page evaluation instead
+            const response = await fetch(url, {
+                headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
+            });
+            const json = await response.json();
+
+            // Save raw response for debug
+            await Actor.setValue(`debug_api_${prov}_skip${skip}`, json);
+            console.log(`API response keys: ${Object.keys(json).join(', ')}`);
+
+            if (json.items || json.companies || json.data || Array.isArray(json)) {
+                apiWorked = true;
+                const items = json.items || json.companies || json.data || json;
+                total = json.total || json.count || json.meta?.total || items.length;
+                console.log(`Got ${items.length} companies, total=${total}`);
+
+                for (const c of items) {
+                    if (collected >= maxItems) break;
+                    await Actor.pushData({
+                        ragioneSociale: c.denominazione || c.name || c.ragioneSociale || '',
+                        cf: c.codice_fiscale || c.cf || '',
+                        piva: c.partita_iva || c.piva || c.vat || '',
+                        indirizzo: c.indirizzo || c.address || '',
+                        comune: c.comune || c.city || c.municipality || '',
+                        provincia: c.provincia || prov,
+                        cap: c.cap || c.zip || '',
+                        ateco: c.codice_ateco || c.ateco || '',
+                        descrizioneAteco: c.descrizione_ateco || c.attivita || '',
+                        formaGiuridica: c.natura_giuridica || c.forma_giuridica || c.legalForm || '',
+                        stato: c.stato || c.status || '',
+                        pec: c.pec || '',
+                        email: c.email || '',
+                        telefono: c.telefono || c.phone || '',
+                        _provincia: prov,
+                        _regione: regioneUp,
+                        _source: 'openapi.it',
+                    });
+                    collected++;
                 }
-            } catch { /* ignore */ }
-        });
-
-        await page.goto(request.url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-        await page.waitForTimeout(3000);
-
-        // Dismiss cookie/login banners
-        await page.evaluate(() => {
-            document.querySelectorAll('[class*="cookie"], [class*="Cookie"], [id*="cookie"], [class*="modal"], [class*="overlay"]')
-                .forEach(el => el.style.display = 'none');
-        }).catch(() => {});
-
-        // Save debug on first run
-        if (offset === 0 && collected === 0) {
-            const html = await page.content();
-            await Actor.setValue(`debug_${prov}`, html, { contentType: 'text/html' });
-            const txt = await page.evaluate(() => document.body.innerText.substring(0, 800));
-            log.info(`Preview:\n${txt}`);
-        }
-
-        log.info(`API companies intercepted: ${apiCompanies.length}`);
-
-        // Parse from DOM if no API
-        let items = apiCompanies.length > 0 ? apiCompanies : await parseDom(page, prov);
-        log.info(`Prov=${prov} offset=${offset}: ${items.length} companies`);
-
-        // Check total
-        const total = await page.evaluate(() => {
-            const el = document.querySelector('[class*="count"], [class*="total"], [class*="risultat"]');
-            const m = el?.textContent.match(/(\d[\d.]*)/);
-            return m ? parseInt(m[1].replace(/\./g,''),10) : 0;
-        });
-        if (offset === 0) log.info(`Total companies: ${total}`);
-
-        for (const item of items) {
-            if (collected >= maxItems) break;
-            await Actor.pushData({ ...item, _provincia: prov, _regione: regioneUp });
-            collected++;
-        }
-
-        // Next page (atoka paginates by 10 or 20)
-        const pageSize = items.length || 10;
-        if (items.length > 0 && collected < maxItems && collected < total) {
-            const nextOffset = offset + pageSize;
-            await addRequests([{
-                url: buildUrl(prov, nextOffset),
-                userData: { prov, offset: nextOffset },
-            }]);
-        }
-    },
-
-    failedRequestHandler({ request, log }) { log.error(`Failed: ${request.url}`); },
-});
-
-await crawler.run(startUrls);
-console.log(`Done. Total saved: ${collected} companies.`);
-await Actor.exit();
-
-function extractCompanies(json) {
-    const candidates = [
-        json.items, json.companies, json.results, json.data?.items,
-        json.data?.companies, Array.isArray(json) ? json : null,
-    ].filter(Array.isArray);
-
-    for (const arr of candidates) {
-        if (arr.length === 0) continue;
-        const first = arr[0];
-        if (first.name || first.denominazione || first.ragioneSociale) {
-            return arr.map(c => ({
-                ragioneSociale: c.name || c.denominazione || c.ragioneSociale || '',
-                cf: c.taxCode || c.cf || c.codiceFiscale || '',
-                piva: c.vatNumber || c.piva || c.partitaIva || '',
-                indirizzo: c.address || c.indirizzo || c.sede || '',
-                comune: c.municipality || c.comune || c.city || '',
-                provincia: c.province || c.provincia || '',
-                cap: c.zipCode || c.cap || '',
-                ateco: c.ateco || c.atecoCode || '',
-                descrizioneAteco: c.atecoDescription || c.attivita || '',
-                formaGiuridica: c.legalForm || c.formaGiuridica || c.natura || '',
-                stato: c.active !== undefined ? (c.active ? 'ATTIVA' : 'CESSATA') : (c.stato || ''),
-                dipendenti: c.employees || c.dipendenti || '',
-                fatturato: c.revenue || c.fatturato || '',
-                email: c.email || '',
-                pec: c.pec || '',
-                telefono: c.phone || c.telefono || '',
-                website: c.website || c.url || '',
-                detailUrl: c.url ? `${c.url}` : '',
-            })).filter(c => c.ragioneSociale);
+                skip += 100;
+                if (items.length === 0) break;
+            } else {
+                console.log(`Unexpected API response: ${JSON.stringify(json).substring(0, 200)}`);
+                break;
+            }
+        } catch(e) {
+            console.log(`API error: ${e.message}`);
+            await Actor.setValue('debug_api_error', { error: e.message, url });
+            break;
         }
     }
-    return [];
 }
 
-async function parseDom(page, prov) {
-    return page.evaluate((prov) => {
-        const g = (el, ...sels) => {
-            for (const s of sels) { try { const f = el.querySelector(s); if (f) return f.textContent.trim(); } catch {} }
-            return '';
-        };
-        const cards = [...document.querySelectorAll(
-            '[class*="company-card"], [class*="CompanyCard"], [class*="company-item"], ' +
-            '[class*="CompanyItem"], [class*="result-item"], article, [class*="card"]'
-        )].filter(el => el.textContent.trim().length > 20 && !el.closest('nav') && !el.closest('header'));
+// ── Strategy 2: Playwright fallback if API didn't work ───────────────────────
+if (!apiWorked && collected === 0) {
+    console.log('API strategy failed, switching to Playwright scraping...');
 
-        return cards.map(card => {
-            const name = g(card, '[class*="name"], [class*="Name"], h2, h3, strong');
-            if (!name || name.length < 2) return null;
-            const link = card.querySelector('a[href*="/aziende/"], a[href*="/company/"]');
-            return {
-                ragioneSociale: name,
-                cf: g(card, '[class*="cf"], [class*="taxCode"], [class*="fiscal"]'),
-                piva: g(card, '[class*="vat"], [class*="piva"]'),
-                indirizzo: g(card, '[class*="address"], [class*="indirizzo"]'),
-                comune: g(card, '[class*="city"], [class*="comune"], [class*="municipality"]'),
-                provincia: prov,
-                ateco: g(card, '[class*="ateco"]'),
-                descrizioneAteco: g(card, '[class*="activity"], [class*="attivita"]'),
-                formaGiuridica: g(card, '[class*="legal"], [class*="forma"]'),
-                stato: g(card, '[class*="status"], [class*="stato"]'),
-                detailUrl: link?.href || '',
-            };
-        }).filter(Boolean);
-    }, prov);
+    // Target: imprese.info — public Italian company directory
+    const startUrls = provinceCodes.map(prov => ({
+        url: `https://www.imprese.info/imprese/provincia/${prov.toLowerCase()}/`,
+        userData: { prov, page: 1 },
+    }));
+
+    const crawler = new PlaywrightCrawler({
+        proxyConfiguration,
+        launchContext: { launchOptions: { headless: true } },
+        requestHandlerTimeoutSecs: 120,
+        maxConcurrency: 1,
+        navigationTimeoutSecs: 45,
+        preNavigationHooks: [
+            async (_ctx, gotoOptions) => { gotoOptions.waitUntil = 'domcontentloaded'; },
+        ],
+
+        async requestHandler({ page, request, log, addRequests }) {
+            const { prov, page: pageNum } = request.userData;
+            log.info(`Playwright: Prov=${prov} page=${pageNum} | ${request.url}`);
+
+            await page.waitForTimeout(2000);
+
+            // Save full HTML for debug
+            const html = await page.content();
+            await Actor.setValue(`debug_playwright_${prov}_p${pageNum}`, html, { contentType: 'text/html' });
+
+            // Save body text
+            const bodyText = await page.evaluate(() => document.body.innerText);
+            await Actor.setValue(`debug_text_${prov}_p${pageNum}`, bodyText, { contentType: 'text/plain' });
+
+            log.info(`HTML saved (${html.length} chars) | Text: ${bodyText.substring(0, 300)}`);
+
+            // Try to parse companies
+            const items = await page.evaluate(() => {
+                const g = (el, ...sels) => { for (const s of sels) { try { const f = el.querySelector(s); if (f) return f.textContent.trim(); } catch {} } return ''; };
+                const cards = [...document.querySelectorAll('tr, [class*="company"], [class*="impresa"], article, li')].filter(el =>
+                    el.textContent.trim().length > 10 && !el.closest('nav') && !el.closest('header')
+                );
+                return cards.slice(0, 50).map(card => {
+                    const cells = [...card.querySelectorAll('td')].map(td => td.textContent.trim());
+                    const name = g(card, 'td:first-child', '[class*="name"]', 'strong', 'h3', 'h4') || cells[0] || '';
+                    if (!name || name.length < 2) return null;
+                    return { ragioneSociale: name, comune: cells[1]||'', provincia: cells[2]||'', indirizzo: cells[3]||'', ateco: cells[4]||'', detailUrl: card.querySelector('a')?.href||'' };
+                }).filter(Boolean);
+            });
+
+            log.info(`Found ${items.length} companies on page ${pageNum}`);
+            for (const item of items) {
+                if (collected >= maxItems) break;
+                await Actor.pushData({ ...item, _provincia: prov, _regione: regioneUp, _source: 'playwright' });
+                collected++;
+            }
+
+            // Next page
+            const nextUrl = await page.evaluate(() => {
+                const a = [...document.querySelectorAll('a')].find(a => /successiv|next|›|>>/i.test(a.textContent));
+                return a?.href || null;
+            });
+            if (nextUrl && collected < maxItems) {
+                await addRequests([{ url: nextUrl, userData: { prov, page: pageNum + 1 } }]);
+            }
+        },
+        failedRequestHandler({ request, log }) { log.error(`Failed: ${request.url}`); },
+    });
+
+    await crawler.run(startUrls);
 }
+
+console.log(`Done. Total saved: ${collected} companies.`);
+await Actor.exit();
