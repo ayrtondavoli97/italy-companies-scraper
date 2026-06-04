@@ -1,17 +1,15 @@
 /**
- * Italy Companies Scraper
- * Source: registroimprese.it — official Italian business registry
- * Input: provincia (required), ateco (optional), forma_giuridica (optional)
- * Output: ragione sociale, provincia, indirizzo, ateco, forma giuridica, CF/PIVA, stato
+ * Italy Companies Scraper v3
+ * Source: atoka.io — web scraping (no API key needed for public data)
+ * Filter by: provincia/regione (required), ateco, forma giuridica
  */
 
 import { Actor } from 'apify';
 import { PlaywrightCrawler } from 'crawlee';
 
-const BASE = 'https://www.registroimprese.it';
+const BASE = 'https://atoka.io';
 
-// Province italiane
-const PROVINCE_MAP = {
+const PROVINCE_CODES = {
     'AGRIGENTO':'AG','ALESSANDRIA':'AL','ANCONA':'AN','AOSTA':'AO','AREZZO':'AR',
     'ASCOLI PICENO':'AP','ASTI':'AT','AVELLINO':'AV','BARI':'BA','BARLETTA-ANDRIA-TRANI':'BT',
     'BELLUNO':'BL','BENEVENTO':'BN','BERGAMO':'BG','BIELLA':'BI','BOLOGNA':'BO',
@@ -55,122 +53,112 @@ await Actor.init();
 
 const input = await Actor.getInput() ?? {};
 const {
-    regione = '',
-    provincia = '',
-    ateco = '',
-    formaGiuridica = '',
-    statoImpresa = 'ATTIVA',
-    maxItems = 5000,
-    proxyConfig: proxyConfigInput,
+    regione = '', provincia = '', ateco = '',
+    formaGiuridica = '', statoImpresa = 'attiva',
+    maxItems = 5000, proxyConfig: proxyConfigInput,
 } = input;
 
-// Resolve province codes
 let provinceCodes = [];
 const regioneUp = regione.toUpperCase().trim();
 const provinciaUp = provincia.toUpperCase().trim();
 
 if (provinciaUp) {
-    const code = PROVINCE_MAP[provinciaUp] || (Object.values(PROVINCE_MAP).includes(provinciaUp) ? provinciaUp : null);
+    const code = PROVINCE_CODES[provinciaUp] || (Object.values(PROVINCE_CODES).includes(provinciaUp) ? provinciaUp : null);
     if (!code) { console.error(`Provincia non riconosciuta: "${provincia}"`); await Actor.exit(1); }
     provinceCodes = [code];
 } else if (regioneUp) {
     provinceCodes = REGIONE_PROVINCE[regioneUp];
     if (!provinceCodes) { console.error(`Regione non riconosciuta: "${regione}"`); await Actor.exit(1); }
 } else {
-    console.error('Input obbligatorio: inserisci "regione" o "provincia"');
-    await Actor.exit(1);
+    console.error('Obbligatorio: "regione" o "provincia"'); await Actor.exit(1);
 }
 
 const proxyConfiguration = proxyConfigInput
     ? await Actor.createProxyConfiguration(proxyConfigInput)
     : undefined;
 
-console.log(`Province: ${provinceCodes.join(', ')} | ATECO: ${ateco||'tutti'} | Stato: ${statoImpresa}`);
+console.log(`Province: ${provinceCodes.join(', ')} | ATECO: ${ateco||'tutti'}`);
+
+// Atoka URL: /it/aziende/?province=BA&active=true&offset=0
+// province param uses sigla (BA, NA, etc.)
+const buildUrl = (prov, offset = 0) => {
+    const params = new URLSearchParams();
+    params.set('province', prov);
+    if (statoImpresa === 'attiva') params.set('active', 'true');
+    if (ateco) params.set('ateco', ateco);
+    if (formaGiuridica) params.set('legalForm', formaGiuridica);
+    params.set('offset', offset);
+    return `${BASE}/it/aziende/?${params.toString()}`;
+};
+
+const startUrls = provinceCodes.map(prov => ({
+    url: buildUrl(prov, 0),
+    userData: { prov, offset: 0 },
+}));
 
 let collected = 0;
-
-// Build start URLs — one per province letter combination (A-Z x province)
-const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
-const startUrls = provinceCodes.flatMap(prov =>
-    LETTERS.map(letter => ({
-        url: `${BASE}/ricercaext?denominazione=${letter}&provincia=${encodeURIComponent(prov)}&ateco=${encodeURIComponent(ateco)}&pagina=1`,
-        userData: { prov, page: 1, letter, isFirst: false },
-    }))
-);
-console.log(`Total search requests queued: ${startUrls.length}`);
 
 const crawler = new PlaywrightCrawler({
     proxyConfiguration,
     launchContext: { launchOptions: { headless: true } },
     requestHandlerTimeoutSecs: 120,
-    maxConcurrency: 1, // single to avoid detection
+    maxConcurrency: 1,
     navigationTimeoutSecs: 45,
     preNavigationHooks: [
-        async (_ctx, gotoOptions) => {
-            gotoOptions.waitUntil = 'domcontentloaded';
-        },
+        async (_ctx, gotoOptions) => { gotoOptions.waitUntil = 'domcontentloaded'; },
     ],
 
     async requestHandler({ page, request, log, addRequests }) {
-        const { prov, page: pageNum, letter = '' } = request.userData;
-        log.info(`Provincia=${prov} letter=${letter} page=${pageNum}`);
+        const { prov, offset } = request.userData;
+        log.info(`Prov=${prov} offset=${offset} | ${request.url}`);
 
-        await page.goto(request.url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-        await page.waitForTimeout(1500);
-        // Dismiss Didomi if present
-        await page.evaluate(() => {
-            const host = document.getElementById('didomi-host');
-            if (host) host.style.display = 'none';
-        }).catch(() => {});
-
-        await page.waitForTimeout(1000);
-
-        // Preview page text
-        const txt = await page.evaluate(() => document.body.innerText.substring(0, 600));
-        log.info(`Page preview:\n${txt}`);
-
-        // Parse results
-        const { items, nextUrl, total } = await page.evaluate(() => {
-            const g = (el, ...sels) => {
-                for (const s of sels) { try { const f = el.querySelector(s); if (f) return f.textContent.trim(); } catch {} }
-                return '';
-            };
-
-            // Total count
-            let total = 0;
-            const totEl = document.querySelector('[class*="totale"], [class*="risultati"], [class*="total"], [class*="count"]');
-            if (totEl) { const m = totEl.textContent.match(/(\d[\d.]*)/); if (m) total = parseInt(m[1].replace(/\./g,''),10); }
-
-            // Result rows — registroimprese.it typically uses table or list layout
-            const rows = [...document.querySelectorAll('table tbody tr, .risultato, [class*="impresa-row"], [class*="company-row"], .row-impresa')];
-
-            const items = rows.map(row => {
-                const cells = [...row.querySelectorAll('td')].map(td => td.textContent.trim());
-                const name = g(row, '.denominazione', '.ragione-sociale', 'td:first-child', 'strong', 'b') || cells[0] || '';
-                if (!name || name.length < 2) return null;
-                const link = row.querySelector('a');
-                return {
-                    ragioneSociale: name,
-                    provincia: cells[1] || g(row, '.provincia') || '',
-                    comune: cells[2] || g(row, '.comune', '.localita') || '',
-                    indirizzo: cells[3] || g(row, '.indirizzo', '.sede') || '',
-                    ateco: cells[4] || g(row, '.ateco', '.attivita') || '',
-                    formaGiuridica: cells[5] || g(row, '.forma-giuridica', '.tipo') || '',
-                    stato: g(row, '.stato', '.status') || '',
-                    cf: g(row, '.cf', '.codice-fiscale', '.piva') || '',
-                    detailUrl: link?.href || '',
-                };
-            }).filter(Boolean);
-
-            // Next page
-            const nextEl = document.querySelector('a[rel="next"], a.next') ||
-                [...document.querySelectorAll('a')].find(a => /successiv/i.test(a.textContent));
-            const nextUrl = nextEl?.href || null;
-
-            return { items, nextUrl, total };
+        // Intercept API responses — atoka uses internal API
+        const apiCompanies = [];
+        page.on('response', async response => {
+            const url = response.url();
+            const ct = response.headers()['content-type'] || '';
+            if (!ct.includes('json')) return;
+            if (!url.includes('/api/') && !url.includes('companies') && !url.includes('aziende')) return;
+            try {
+                const json = await response.json();
+                const companies = extractCompanies(json);
+                if (companies.length > 0) {
+                    apiCompanies.push(...companies);
+                    log.info(`API: ${url.substring(0,80)} → ${companies.length} companies`);
+                }
+            } catch { /* ignore */ }
         });
 
-        log.info(`Prov=${prov} pg=${pageNum}: ${items.length} companies | total=${total}`);
+        await page.goto(request.url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+        await page.waitForTimeout(3000);
+
+        // Dismiss cookie/login banners
+        await page.evaluate(() => {
+            document.querySelectorAll('[class*="cookie"], [class*="Cookie"], [id*="cookie"], [class*="modal"], [class*="overlay"]')
+                .forEach(el => el.style.display = 'none');
+        }).catch(() => {});
+
+        // Save debug on first run
+        if (offset === 0 && collected === 0) {
+            const html = await page.content();
+            await Actor.setValue(`debug_${prov}`, html, { contentType: 'text/html' });
+            const txt = await page.evaluate(() => document.body.innerText.substring(0, 800));
+            log.info(`Preview:\n${txt}`);
+        }
+
+        log.info(`API companies intercepted: ${apiCompanies.length}`);
+
+        // Parse from DOM if no API
+        let items = apiCompanies.length > 0 ? apiCompanies : await parseDom(page, prov);
+        log.info(`Prov=${prov} offset=${offset}: ${items.length} companies`);
+
+        // Check total
+        const total = await page.evaluate(() => {
+            const el = document.querySelector('[class*="count"], [class*="total"], [class*="risultat"]');
+            const m = el?.textContent.match(/(\d[\d.]*)/);
+            return m ? parseInt(m[1].replace(/\./g,''),10) : 0;
+        });
+        if (offset === 0) log.info(`Total companies: ${total}`);
 
         for (const item of items) {
             if (collected >= maxItems) break;
@@ -178,8 +166,14 @@ const crawler = new PlaywrightCrawler({
             collected++;
         }
 
-        if (nextUrl && collected < maxItems) {
-            await addRequests([{ url: nextUrl, userData: { prov, page: pageNum + 1, isFirst: false } }]);
+        // Next page (atoka paginates by 10 or 20)
+        const pageSize = items.length || 10;
+        if (items.length > 0 && collected < maxItems && collected < total) {
+            const nextOffset = offset + pageSize;
+            await addRequests([{
+                url: buildUrl(prov, nextOffset),
+                userData: { prov, offset: nextOffset },
+            }]);
         }
     },
 
@@ -189,3 +183,70 @@ const crawler = new PlaywrightCrawler({
 await crawler.run(startUrls);
 console.log(`Done. Total saved: ${collected} companies.`);
 await Actor.exit();
+
+function extractCompanies(json) {
+    const candidates = [
+        json.items, json.companies, json.results, json.data?.items,
+        json.data?.companies, Array.isArray(json) ? json : null,
+    ].filter(Array.isArray);
+
+    for (const arr of candidates) {
+        if (arr.length === 0) continue;
+        const first = arr[0];
+        if (first.name || first.denominazione || first.ragioneSociale) {
+            return arr.map(c => ({
+                ragioneSociale: c.name || c.denominazione || c.ragioneSociale || '',
+                cf: c.taxCode || c.cf || c.codiceFiscale || '',
+                piva: c.vatNumber || c.piva || c.partitaIva || '',
+                indirizzo: c.address || c.indirizzo || c.sede || '',
+                comune: c.municipality || c.comune || c.city || '',
+                provincia: c.province || c.provincia || '',
+                cap: c.zipCode || c.cap || '',
+                ateco: c.ateco || c.atecoCode || '',
+                descrizioneAteco: c.atecoDescription || c.attivita || '',
+                formaGiuridica: c.legalForm || c.formaGiuridica || c.natura || '',
+                stato: c.active !== undefined ? (c.active ? 'ATTIVA' : 'CESSATA') : (c.stato || ''),
+                dipendenti: c.employees || c.dipendenti || '',
+                fatturato: c.revenue || c.fatturato || '',
+                email: c.email || '',
+                pec: c.pec || '',
+                telefono: c.phone || c.telefono || '',
+                website: c.website || c.url || '',
+                detailUrl: c.url ? `${c.url}` : '',
+            })).filter(c => c.ragioneSociale);
+        }
+    }
+    return [];
+}
+
+async function parseDom(page, prov) {
+    return page.evaluate((prov) => {
+        const g = (el, ...sels) => {
+            for (const s of sels) { try { const f = el.querySelector(s); if (f) return f.textContent.trim(); } catch {} }
+            return '';
+        };
+        const cards = [...document.querySelectorAll(
+            '[class*="company-card"], [class*="CompanyCard"], [class*="company-item"], ' +
+            '[class*="CompanyItem"], [class*="result-item"], article, [class*="card"]'
+        )].filter(el => el.textContent.trim().length > 20 && !el.closest('nav') && !el.closest('header'));
+
+        return cards.map(card => {
+            const name = g(card, '[class*="name"], [class*="Name"], h2, h3, strong');
+            if (!name || name.length < 2) return null;
+            const link = card.querySelector('a[href*="/aziende/"], a[href*="/company/"]');
+            return {
+                ragioneSociale: name,
+                cf: g(card, '[class*="cf"], [class*="taxCode"], [class*="fiscal"]'),
+                piva: g(card, '[class*="vat"], [class*="piva"]'),
+                indirizzo: g(card, '[class*="address"], [class*="indirizzo"]'),
+                comune: g(card, '[class*="city"], [class*="comune"], [class*="municipality"]'),
+                provincia: prov,
+                ateco: g(card, '[class*="ateco"]'),
+                descrizioneAteco: g(card, '[class*="activity"], [class*="attivita"]'),
+                formaGiuridica: g(card, '[class*="legal"], [class*="forma"]'),
+                stato: g(card, '[class*="status"], [class*="stato"]'),
+                detailUrl: link?.href || '',
+            };
+        }).filter(Boolean);
+    }, prov);
+}
