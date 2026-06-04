@@ -112,30 +112,24 @@ const crawler = new PlaywrightCrawler({
         log.info(`Provincia=${prov} page=${pageNum}`);
 
         if (isFirst) {
-            // Navigate directly to search results URL with province parameter
-            // registroimprese.it accepts GET params for search
-            const searchUrl = `${BASE}/ricerca-libera?denomin=&prov=${encodeURIComponent(prov)}&natura=&rea=&cf=&indirizzo=&comune=&cap=&ateco=${encodeURIComponent(ateco)}&paginaRisultati=1`;
-            log.info(`Navigating to search URL: ${searchUrl}`);
-            await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-            await page.waitForTimeout(2000);
-
-            // Dismiss Didomi if present
-            try {
-                await page.evaluate(() => {
-                    const host = document.getElementById('didomi-host');
-                    if (host) host.style.display = 'none';
-                });
-            } catch { /* ignore */ }
-
-            // Save debug HTML
-            if (collected === 0) {
-                const html = await page.content();
-                await Actor.setValue(`debug_results_${prov}`, html, { contentType: 'text/html' });
-                const txt = await page.evaluate(() => document.body.innerText.substring(0, 800));
-                log.info(`Search page preview:\n${txt}`);
-            }
+            // registroimprese.it requires a search term — iterate over alphabet letters
+            // Queue all 26 letters for this province
+            const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+            const letterRequests = letters.map(letter => ({
+                url: `${BASE}/ricercaext?denominazione=${letter}&provincia=${encodeURIComponent(prov)}&ateco=${encodeURIComponent(ateco)}&pagina=1`,
+                userData: { prov, page: 1, letter, isFirst: false },
+            }));
+            await addRequests(letterRequests);
+            log.info(`Queued ${letterRequests.length} letter searches for prov=${prov}`);
+            return; // Don't process this page further
         } else {
             await page.goto(request.url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+            await page.waitForTimeout(1500);
+            // Dismiss Didomi if present
+            await page.evaluate(() => {
+                const host = document.getElementById('didomi-host');
+                if (host) host.style.display = 'none';
+            }).catch(() => {});
         }
 
         await page.waitForTimeout(1000);
