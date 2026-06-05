@@ -79,14 +79,11 @@ console.log(`Province: ${provinceCodes.join(', ')} | maxItems: ${maxItems}`);
 
 let collected = 0;
 
-// INI-PEC search URL:
-// https://www.inipec.gov.it/cerca-pec/-/pec/imprese?denominazione=&provincia=BA&pec=&cf=&tipo_ricerca=inipec
-const buildUrl = (prov, page = 1) =>
-    `https://www.inipec.gov.it/cerca-pec/-/pec/imprese?denominazione=&provincia=${prov}&pec=&cf=&tipo_ricerca=inipec&p_p_state=normal&p_p_mode=view&_pec_WAR_inipecportlet_cur=${page}`;
+const BASE_URL = 'https://www.inipec.gov.it/cerca-pec/-/pec/imprese';
 
 const startUrls = provinceCodes.map(prov => ({
-    url: buildUrl(prov, 1),
-    userData: { prov, page: 1 },
+    url: BASE_URL,
+    userData: { prov, page: 1, isFirst: true },
 }));
 
 const crawler = new PlaywrightCrawler({
@@ -100,18 +97,67 @@ const crawler = new PlaywrightCrawler({
     ],
 
     async requestHandler({ page, request, log, addRequests }) {
-        const { prov, page: pageNum } = request.userData;
+        const { prov, page: pageNum, isFirst } = request.userData;
         log.info(`INI-PEC | Prov=${prov} page=${pageNum}`);
 
-        await page.waitForTimeout(2000);
+        if (isFirst) {
+            // Load page and fill the search form
+            await page.goto(BASE_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+            await page.waitForTimeout(2000);
+
+            // Dismiss cookie banner if present
+            try {
+                const okBtn = page.locator('a:has-text("OK"), button:has-text("OK"), .cookie-btn').first();
+                if (await okBtn.isVisible({ timeout: 2000 })) { await okBtn.click(); await page.waitForTimeout(500); }
+            } catch { /* ignore */ }
+
+            // Debug: save form HTML before filling
+            const html0 = await page.content();
+            await Actor.setValue(`debug_form_${prov}`, html0, { contentType: 'text/html' });
+            const txt0 = await page.evaluate(() => document.body.innerText);
+            log.info(`Form page preview:\n${txt0.substring(0, 400)}`);
+
+            // Find and fill provincia field
+            // INI-PEC has a select dropdown for provincia
+            try {
+                // Try select dropdown first
+                const provSel = page.locator('select[name*="provincia"], select[id*="provincia"]').first();
+                if (await provSel.isVisible({ timeout: 3000 })) {
+                    await provSel.selectOption(prov);
+                    log.info(`Province selected in dropdown: ${prov}`);
+                } else {
+                    // Try text input
+                    const provInput = page.locator('input[name*="provincia"], input[id*="provincia"]').first();
+                    if (await provInput.isVisible({ timeout: 3000 })) {
+                        await provInput.fill(prov);
+                        log.info(`Province typed in input: ${prov}`);
+                    }
+                }
+            } catch(e) { log.warning(`Province field error: ${e.message}`); }
+
+            // Submit
+            try {
+                const submitBtn = page.locator('input[type="submit"], button[type="submit"], .btn-cerca, button:has-text("Cerca")').first();
+                if (await submitBtn.isVisible({ timeout: 3000 })) {
+                    await submitBtn.click();
+                    await page.waitForLoadState('domcontentloaded', { timeout: 20_000 });
+                    log.info(`Submitted | URL: ${page.url()}`);
+                }
+            } catch(e) { log.warning(`Submit error: ${e.message}`); }
+
+            await page.waitForTimeout(1000);
+        } else {
+            await page.goto(request.url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+            await page.waitForTimeout(1000);
+        }
 
         // Full debug on first page
-        if (pageNum === 1 && collected === 0) {
+        if (pageNum === 1) {
             const html = await page.content();
-            await Actor.setValue(`debug_html_${prov}_p1`, html, { contentType: 'text/html' });
+            await Actor.setValue(`debug_results_${prov}_p1`, html, { contentType: 'text/html' });
             const txt = await page.evaluate(() => document.body.innerText);
             await Actor.setValue(`debug_text_${prov}_p1`, txt, { contentType: 'text/plain' });
-            log.info(`Debug saved | Text preview:\n${txt.substring(0, 500)}`);
+            log.info(`Results debug saved | Text preview:\n${txt.substring(0, 500)}`);
         }
 
         // Parse results table
