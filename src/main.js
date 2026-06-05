@@ -105,11 +105,25 @@ const crawler = new PlaywrightCrawler({
             await page.goto(BASE_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
             await page.waitForTimeout(2000);
 
-            // Wait for form to load (Liferay loads async)
-            try {
-                await page.waitForSelector('form, input, select', { timeout: 15_000 });
-                log.info('Form elements detected');
-            } catch { log.warning('Form not found after 15s'); }
+            // Wait longer for the PEC form to load (Angular/JS app)
+            await page.waitForTimeout(8000);
+            // Take screenshot to see actual rendered page
+            const screenshot = await page.screenshot({ fullPage: true });
+            await Actor.setValue(`screenshot_${prov}`, screenshot, { contentType: 'image/png' });
+            log.info('Screenshot saved');
+
+            // Check if there's an Angular/React app container
+            const appInfo = await page.evaluate(() => {
+                const body = document.body.innerHTML;
+                return {
+                    hasAngular: body.includes('ng-') || body.includes('ng-app') || !!document.querySelector('[ng-app], [data-ng-app], app-root'),
+                    hasReact: !!document.querySelector('#root, #app, [data-reactroot]'),
+                    scripts: [...document.querySelectorAll('script[src]')].map(s => s.src).filter(s => s.includes('app') || s.includes('main') || s.includes('bundle')).slice(0,5),
+                    bodyLength: body.length,
+                    divCount: document.querySelectorAll('div').length,
+                };
+            });
+            log.info(`App info: ${JSON.stringify(appInfo)}`);
 
             // Dismiss cookie banner if present
             try {
