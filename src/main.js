@@ -123,14 +123,33 @@ const crawler = new PlaywrightCrawler({
             const txt0 = await page.evaluate(() => document.body.innerText);
             log.info(`Form page preview:\n${txt0.substring(0, 400)}`);
 
-            // Log all form inputs found
-            const inputs = await page.evaluate(() =>
-                [...document.querySelectorAll('input, select, textarea')].map(el => ({
-                    tag: el.tagName, type: el.type, name: el.name, id: el.id,
-                    visible: el.offsetParent !== null
-                }))
+            // Check for iframes (PEC form might be inside one)
+            const frames = page.frames();
+            log.info(`Frames on page: ${frames.length}`);
+            for (const f of frames) {
+                log.info(`  Frame URL: ${f.url()}`);
+            }
+
+            // Log all links to find the real PEC search page
+            const links = await page.evaluate(() =>
+                [...document.querySelectorAll('a[href]')]
+                    .map(a => ({ text: a.textContent.trim().substring(0,40), href: a.href }))
+                    .filter(a => a.text && (a.href.includes('pec') || a.href.includes('cerca') || a.href.includes('ricerca') || a.text.toLowerCase().includes('impresa') || a.text.toLowerCase().includes('cerca')))
             );
-            log.info(`Form inputs found: ${JSON.stringify(inputs)}`);
+            log.info(`Relevant links: ${JSON.stringify(links)}`);
+
+            // Log all inputs across all frames
+            for (const f of frames) {
+                try {
+                    const fInputs = await f.evaluate(() =>
+                        [...document.querySelectorAll('input, select, textarea')].map(el => ({
+                            tag: el.tagName, type: el.type, name: el.name?.substring(0,50), id: el.id?.substring(0,50),
+                            visible: el.offsetParent !== null
+                        })).filter(i => i.visible)
+                    );
+                    if (fInputs.length > 0) log.info(`Frame ${f.url().substring(0,50)} visible inputs: ${JSON.stringify(fInputs)}`);
+                } catch { /* cross-origin */ }
+            }
 
             // Find and fill provincia field
             // INI-PEC has a select dropdown for provincia
