@@ -93,7 +93,7 @@ const crawler = new PlaywrightCrawler({
     maxConcurrency: 1,
     navigationTimeoutSecs: 45,
     preNavigationHooks: [
-        async (_ctx, gotoOptions) => { gotoOptions.waitUntil = 'domcontentloaded'; },
+        async (_ctx, gotoOptions) => { gotoOptions.waitUntil = 'networkidle'; },
     ],
 
     async requestHandler({ page, request, log, addRequests }) {
@@ -104,6 +104,12 @@ const crawler = new PlaywrightCrawler({
             // Load page and fill the search form
             await page.goto(BASE_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
             await page.waitForTimeout(2000);
+
+            // Wait for form to load (Liferay loads async)
+            try {
+                await page.waitForSelector('form, input, select', { timeout: 15_000 });
+                log.info('Form elements detected');
+            } catch { log.warning('Form not found after 15s'); }
 
             // Dismiss cookie banner if present
             try {
@@ -116,6 +122,15 @@ const crawler = new PlaywrightCrawler({
             await Actor.setValue(`debug_form_${prov}`, html0, { contentType: 'text/html' });
             const txt0 = await page.evaluate(() => document.body.innerText);
             log.info(`Form page preview:\n${txt0.substring(0, 400)}`);
+
+            // Log all form inputs found
+            const inputs = await page.evaluate(() =>
+                [...document.querySelectorAll('input, select, textarea')].map(el => ({
+                    tag: el.tagName, type: el.type, name: el.name, id: el.id,
+                    visible: el.offsetParent !== null
+                }))
+            );
+            log.info(`Form inputs found: ${JSON.stringify(inputs)}`);
 
             // Find and fill provincia field
             // INI-PEC has a select dropdown for provincia
