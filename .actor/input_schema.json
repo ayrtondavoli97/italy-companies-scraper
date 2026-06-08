@@ -35,6 +35,7 @@
         "proxyConfig": {
             "title": "Proxy",
             "type": "object",
+            "description": "Configurazione proxy Apify.",
             "editor": "proxy",
             "default": { "useApifyProxy": true }
         }
