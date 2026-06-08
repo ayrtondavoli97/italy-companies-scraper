@@ -1,6 +1,6 @@
 {
     "name": "italy-companies-scraper",
-    "version": "8.0.0",
+    "version": "9.0.0",
     "type": "module",
     "main": "src/main.js",
     "dependencies": {

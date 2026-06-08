@@ -1,59 +1,43 @@
 {
-    "title": "Italy Companies Scraper — registroimprese.it (listing)",
+    "title": "Aziende.it Scraper — imprese per categoria ATECO",
     "type": "object",
     "schemaVersion": 1,
     "properties": {
-        "keyword": {
-            "title": "Termine di ricerca",
-            "type": "string",
-            "description": "Ricerca libera: categoria (es. INFORMATICA), nome impresa, o descrizione/codice ATECO. Matcha nome + attività + ATECO.",
-            "editor": "textfield",
-            "default": "INFORMATICA"
-        },
-        "regione": {
-            "title": "Regione (opzionale)",
-            "type": "string",
-            "description": "Espansa in tutte le sue province per segmentare la ricerca e battere il cap risultati.",
-            "editor": "select",
-            "enum": ["","ABRUZZO","BASILICATA","CALABRIA","CAMPANIA","EMILIA-ROMAGNA","FRIULI-VENEZIA GIULIA","LAZIO","LIGURIA","LOMBARDIA","MARCHE","MOLISE","PIEMONTE","PUGLIA","SARDEGNA","SICILIA","TOSCANA","TRENTINO-ALTO ADIGE","UMBRIA","VALLE D'AOSTA","VENETO"],
-            "enumTitles": ["— nessuna (Tutta Italia) —","Abruzzo","Basilicata","Calabria","Campania","Emilia-Romagna","Friuli-Venezia Giulia","Lazio","Liguria","Lombardia","Marche","Molise","Piemonte","Puglia","Sardegna","Sicilia","Toscana","Trentino-Alto Adige","Umbria","Valle d'Aosta","Veneto"],
-            "default": ""
-        },
-        "provincia": {
-            "title": "Provincia (opzionale)",
-            "type": "string",
-            "description": "Singola provincia. Nome (es. NAPOLI) o sigla (es. NA). Sovrascrive la regione.",
-            "editor": "textfield",
-            "default": ""
+        "startUrls": {
+            "title": "URL categorie ATECO",
+            "type": "array",
+            "description": "Una o più pagine-categoria di aziende.it, es: https://www.aziende.it/categorie/servizi-di-informazione-e-comunicazione/62/62.02.0",
+            "editor": "stringList",
+            "default": ["https://www.aziende.it/categorie/servizi-di-informazione-e-comunicazione/62/62.02.0"]
         },
         "maxItems": {
             "title": "Max risultati totali",
             "type": "integer",
-            "description": "Numero massimo di imprese da salvare.",
+            "description": "Numero massimo di aziende da salvare.",
             "default": 5000,
             "minimum": 1,
-            "maximum": 100000
+            "maximum": 500000
         },
-        "maxPagesPerQuery": {
-            "title": "Max pagine per query",
+        "maxPagesPerCategory": {
+            "title": "Max pagine per categoria",
             "type": "integer",
-            "description": "Limite di pagine seguite via 'Successivo' per ogni (keyword, provincia). Serve anche a misurare il cap del portale.",
-            "default": 50,
+            "description": "Limite di pagine (?pag=N) seguite per ciascun URL categoria.",
+            "default": 10,
             "minimum": 1,
-            "maximum": 1000
+            "maximum": 5000
         },
         "debug": {
-            "title": "Debug (dump HTML nel KV Store)",
+            "title": "Debug (dump HTML)",
             "type": "boolean",
-            "description": "Salva landing e prima pagina risultati nel Key-Value Store per finalizzare i selettori.",
+            "description": "Salva l'HTML della prima pagina nel Key-Value Store per verificare i selettori.",
             "default": true
         },
         "proxyConfig": {
-            "title": "Proxy configuration",
+            "title": "Proxy",
             "type": "object",
-            "description": "Configurazione proxy Apify.",
             "editor": "proxy",
             "default": { "useApifyProxy": true }
         }
-    }
+    },
+    "required": ["startUrls"]
 }

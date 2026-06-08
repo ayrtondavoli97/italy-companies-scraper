@@ -1,9 +1,9 @@
 {
     "actorSpecification": 1,
-    "name": "italy-companies-scraper",
-    "title": "Italy Companies Scraper — Search by Region & Province",
-    "description": "Extract Italian company listings from registroimprese.it (ricerca libera, official CCIAA registry) by free-text keyword/category, segmented by region/province. Listing-only base.",
-    "version": "3.0",
+    "name": "aziende-it-scraper",
+    "title": "Aziende.it Scraper — Italian companies by ATECO category",
+    "description": "Scrape Italian company listings from aziende.it by ATECO category: name, revenue band, ATECO code, province, city, detail URL. Fast HTTP scraper, no browser.",
+    "version": "9.0",
     "buildTag": "latest",
     "dockerfile": "./Dockerfile",
     "input": "./input_schema.json",
@@ -21,11 +21,11 @@
                     "transformation": {
                         "fields": [
                             "ragioneSociale",
-                            "comune",
+                            "ateco",
+                            "fatturato",
                             "provincia",
-                            "formaGiuridica",
-                            "descrizione",
-                            "stato",
+                            "citta",
+                            "categoria",
                             "detailUrl"
                         ]
                     },
@@ -36,24 +36,24 @@
                                 "label": "Ragione Sociale",
                                 "format": "text"
                             },
-                            "comune": {
-                                "label": "Comune",
+                            "ateco": {
+                                "label": "ATECO",
+                                "format": "text"
+                            },
+                            "fatturato": {
+                                "label": "Fatturato",
                                 "format": "text"
                             },
                             "provincia": {
                                 "label": "Provincia",
                                 "format": "text"
                             },
-                            "formaGiuridica": {
-                                "label": "Forma Giuridica",
+                            "citta": {
+                                "label": "Città",
                                 "format": "text"
                             },
-                            "descrizione": {
-                                "label": "Attività",
-                                "format": "text"
-                            },
-                            "stato": {
-                                "label": "Stato",
+                            "categoria": {
+                                "label": "Categoria",
                                 "format": "text"
                             },
                             "detailUrl": {
