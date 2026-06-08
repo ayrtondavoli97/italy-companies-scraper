@@ -139,9 +139,18 @@ const crawler = new PlaywrightCrawler({
         const { prov, term } = request.userData;
         const tag = prov || 'IT';
 
-        // Wait for the search form to be present (not the whole page load).
+        // Dismiss Didomi consent FIRST — it can gate/cover the form.
+        await page.waitForTimeout(1500);
+        for (const sel of ['#didomi-notice-agree-button', 'button:has-text("Accetta")', 'button:has-text("Acconsenti")', 'button:has-text("Accetto")', '.didomi-continue-without-agreeing', '#onetrust-accept-btn-handler']) {
+            try {
+                const b = page.locator(sel).first();
+                if (await b.isVisible({ timeout: 1200 })) { await b.click(); await page.waitForTimeout(500); log.info(`[${tag}] dismissed consent via ${sel}`); break; }
+            } catch { /* ignore */ }
+        }
+
+        // Wait for the search form to exist in the DOM (attached, not visible).
         try {
-            await page.waitForSelector('#inputSearchField, input.inputFiltroRicerca', { timeout: 60000 });
+            await page.waitForSelector('#inputSearchField, input.inputFiltroRicerca', { state: 'attached', timeout: 60000 });
         } catch {
             log.warning(`[${tag}] search form never appeared. Dumping for inspection.`);
             if (debug) {
@@ -152,15 +161,7 @@ const crawler = new PlaywrightCrawler({
             }
             return;
         }
-        await page.waitForTimeout(1500); // let grecaptcha attach
-
-        // Dismiss Didomi consent banner if present (it can swallow clicks).
-        for (const sel of ['#didomi-notice-agree-button', 'button:has-text("Accetta")', 'button:has-text("Acconsenti")', '.didomi-continue-without-agreeing']) {
-            try {
-                const b = page.locator(sel).first();
-                if (await b.isVisible({ timeout: 1500 })) { await b.click(); await page.waitForTimeout(400); break; }
-            } catch { /* ignore */ }
-        }
+        await page.waitForTimeout(1000); // let grecaptcha attach
 
         // Fill the search box (try id, then the autocomplete class, desktop one).
         let filled = false;
