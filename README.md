@@ -56,11 +56,46 @@ For full-detail runs, increase the Actor timeout in **Run options**:
 
 For larger full-detail runs, increase memory from 1 GB to 2 GB if needed.
 
+## Category QA / preset validation mode
+
+The Actor includes a testing mode to validate all preset categories before publishing or scaling a run.
+
+Use **Test all preset categories** together with **Maximum results per category** set to `1` or `2`.
+
+This mode is useful to check which category presets return valid company rows and which presets need to be replaced or removed.
+
+Example QA input:
+
+```json
+{
+  "allCategories": true,
+  "maxItemsPerCategory": 2,
+  "maxItems": 100,
+  "includeDetails": false,
+  "includeWebsiteContacts": false,
+  "proxyConfig": {
+    "useApifyProxy": true
+  }
+}
+```
+
+The Actor also writes a `category-summary.json` file to the key-value store. This summary reports each tested preset URL with:
+
+- category key
+- category URL
+- parsed total results, when detected
+- pages processed
+- rows parsed
+- records collected
+- status (`quota_reached`, `valid_partial`, `empty_or_invalid`, or `pending`)
+
+Use this QA output before deciding which categories should be exposed commercially.
+
 ## Important limitation about contacts
 
 This Actor should be positioned as an **Italian companies registry dataset scraper**, not as an email lead scraper.
 
-azienda.it rarely exposes real email, PEC, phone or website fields on company detail pages. These fields are included in the output schema because they may appear in some cases, but they are often null.
+aziende.it rarely exposes real email, PEC, phone or website fields on company detail pages. These fields are included in the output schema because they may appear in some cases, but they are often null.
 
 For email, PEC, phone or website discovery at scale, use a separate contact-enrichment workflow after exporting this dataset.
 
@@ -95,9 +130,17 @@ Example:
 ["software", "consulenza"]
 ```
 
+### Test all preset categories
+
+QA/testing option. Runs all preset categories. Use this mainly while validating the Actor, not for normal production scraping.
+
+### Maximum results per category
+
+Optional category-level limit. Use `1` or `2` for quick validation runs. Leave it set to `0` for normal production scraping.
+
 ### Maximum results
 
-Maximum number of companies to save.
+Maximum number of companies to save overall.
 
 ### Include company details
 
