@@ -1,9 +1,9 @@
 {
     "actorSpecification": 1,
-    "name": "italy-companies-scraper",
-    "title": "Italy Companies Scraper — Italian business registry dataset",
-    "description": "Extract Italian company registry-style data by business category from aziende.it. The default mode is a fast listing dataset. Optional full details enrichment adds VAT number, address, postal code and employee range when available.",
-    "version": "11.2",
+    "name": "italian-company-data-scraper",
+    "title": "Italian Company Data Scraper — business registry dataset by category",
+    "description": "Extract structured Italian company data by validated business categories from aziende.it. Fast listing mode returns company name, revenue range, ATECO code and location. Optional detail enrichment adds VAT number, address, postal code and employee range when available.",
+    "version": "11.4",
     "buildTag": "latest",
     "dockerfile": "./Dockerfile",
     "input": "./input_schema.json",
@@ -21,6 +21,7 @@
                     "transformation": {
                         "fields": [
                             "ragioneSociale",
+                            "categoryKey",
                             "fatturato",
                             "fatturatoMinEur",
                             "fatturatoMaxEur",
@@ -42,6 +43,7 @@
                             "formaGiuridica",
                             "statoAttivita",
                             "dataCostituzione",
+                            "sourceCategoryUrl",
                             "detailScraped"
                         ]
                     },
@@ -49,14 +51,15 @@
                         "component": "table",
                         "properties": {
                             "ragioneSociale": { "label": "Company name", "format": "text" },
+                            "categoryKey": { "label": "Requested category", "format": "text" },
                             "fatturato": { "label": "Revenue range", "format": "text" },
                             "fatturatoMinEur": { "label": "Revenue min EUR", "format": "number" },
                             "fatturatoMaxEur": { "label": "Revenue max EUR", "format": "number" },
                             "ateco": { "label": "ATECO code", "format": "text" },
                             "provincia": { "label": "Province", "format": "text" },
                             "citta": { "label": "City", "format": "text" },
-                            "categoria": { "label": "Source category", "format": "text" },
-                            "detailUrl": { "label": "Source detail page", "format": "link" },
+                            "categoria": { "label": "Source category label", "format": "text" },
+                            "detailUrl": { "label": "Company detail page", "format": "link" },
                             "partitaIva": { "label": "VAT number", "format": "text" },
                             "indirizzo": { "label": "Address", "format": "text" },
                             "cap": { "label": "Postal code", "format": "text" },
@@ -70,6 +73,7 @@
                             "formaGiuridica": { "label": "Legal form", "format": "text" },
                             "statoAttivita": { "label": "Activity status", "format": "text" },
                             "dataCostituzione": { "label": "Foundation date", "format": "text" },
+                            "sourceCategoryUrl": { "label": "Source category URL", "format": "link" },
                             "detailScraped": { "label": "Details included", "format": "boolean" }
                         }
                     }
