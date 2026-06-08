@@ -1,38 +1,62 @@
-# Italy Companies Scraper
+# Italian Company Data Scraper
 
-Build targeted datasets of Italian companies from aziende.it using simple business categories such as software, IT consulting, food, textile, construction, real estate, restaurants, transport, tourism and mechanics.
+Extract structured Italian company data from aziende.it by business category.
 
-The Actor is designed for buyers who need structured Italian business data for market research, B2B prospecting preparation, competitive intelligence, local business analysis, data enrichment workflows, CRM seeding, territory mapping, SEO research, investment scouting or lead-list building before adding a separate contact-enrichment layer.
+This Actor is built for users who need clean Italian business datasets for market research, B2B research, CRM preparation, territory mapping, competitive intelligence, SEO analysis, supplier discovery, investment scouting, and BI or AI data workflows.
 
-## What this Actor does
+The default mode is fast and lightweight. It collects company listing data such as company name, revenue range, ATECO code, province, city and source detail URL. An optional details mode opens each company page and enriches the dataset with VAT number, address, postal code and employee range when available.
 
-Italy Companies Scraper collects company records from Italian business category pages and exports them to an Apify dataset in a clean tabular format.
+## What you can scrape
 
-By default, the Actor runs in **fast listing mode**. This mode is optimized for speed and returns the fields available directly from category listing pages.
+Validated categories currently supported:
 
-An optional checkbox, **Include company details**, enables a slower enrichment pass that opens each company detail page and adds registry-style fields such as VAT number, address, postal code and employee range when available.
+- `informatica`
+- `software`
+- `consulenza`
+- `marketing`
+- `edilizia`
+- `immobiliare`
+- `turismo`
+- `trasporti`
 
-## Default mode: fast listing dataset
+Categories such as food, textile, restaurants and mechanics were tested but are not exposed as validated presets yet because the tested source URLs returned no compatible rows. You can still use **Advanced category URLs** if you have a specific aziende.it category URL you want to scrape.
 
-The default run does **not** open every company detail page. This keeps runs fast and lightweight.
+## Main use cases
 
-Default listing fields include:
+- Build Italian company datasets by business sector
+- Map companies by city, province, ATECO code or revenue range
+- Prepare CRM imports before email/contact enrichment
+- Identify companies in a target industry or region
+- Analyze market density and regional business distribution
+- Build lead research datasets without claiming direct email coverage
+- Feed dashboards, spreadsheets, BI tools, data warehouses or AI workflows
+- Research suppliers, competitors, agencies, transport companies, real estate firms or construction businesses
+
+## Fast listing mode
+
+By default, **Include company details** is disabled.
+
+This mode is much faster because it only reads category listing pages.
+
+Listing fields include:
 
 - Company name
+- Requested category
 - Revenue range
-- Revenue minimum estimate in EUR
-- Revenue maximum estimate in EUR
+- Parsed revenue minimum in EUR
+- Parsed revenue maximum in EUR
 - ATECO code
 - Province
 - City
-- Source category
-- Source detail page URL
+- Source category label
+- Company detail page URL
+- Source category URL
 
-Use this mode when you need thousands of Italian company records quickly.
+Use this mode when you need thousands of records quickly.
 
 ## Optional full-detail mode
 
-Enable **Include company details** when you need richer registry-style data.
+Enable **Include company details** when you need richer registry-style fields.
 
 Full-detail enrichment can add:
 
@@ -41,10 +65,12 @@ Full-detail enrichment can add:
 - Postal code
 - Employee range
 - Tax code, when available
-- REA, when available
+- REA registry number, when available
 - Legal form, when available
 - Activity status, when available
 - Foundation date, when available
+
+Full-detail mode is slower because each company requires an additional detail-page request.
 
 Based on current tests, about **100 companies with details are pushed to the dataset in roughly 1 minute**. The exact speed depends on source response time, proxy performance and Apify runtime conditions.
 
@@ -54,50 +80,21 @@ For full-detail runs, increase the Actor timeout in **Run options**:
 - 1,000 companies with details: use at least **1,800 seconds**
 - 5,000 companies with details: use around **7,200 seconds**
 
-For larger full-detail runs, increase memory from 1 GB to 2 GB if needed.
+For larger full-detail runs, increasing memory from 1 GB to 2 GB can be useful.
 
-## Category QA / preset validation mode
+## Balanced multi-category runs
 
-The Actor includes a testing mode to validate all preset categories before publishing or scaling a run.
+Use **Maximum results per category** when scraping multiple categories and you want a balanced dataset.
 
-Use **Test all preset categories** together with **Maximum results per category** set to `1` or `2`.
-
-This mode is useful to check which category presets return valid company rows and which presets need to be replaced or removed.
-
-Example QA input:
+Example: if you select `software`, `marketing` and `edilizia`, and set:
 
 ```json
-{
-  "allCategories": true,
-  "maxItemsPerCategory": 2,
-  "maxItems": 100,
-  "includeDetails": false,
-  "includeWebsiteContacts": false,
-  "proxyConfig": {
-    "useApifyProxy": true
-  }
-}
+"maxItemsPerCategory": 1000
 ```
 
-The Actor also writes a `category-summary.json` file to the key-value store. This summary reports each tested preset URL with:
+then the Actor will try to collect up to 1,000 companies per requested category, while still respecting the overall **Maximum results** limit.
 
-- category key
-- category URL
-- parsed total results, when detected
-- pages processed
-- rows parsed
-- records collected
-- status (`quota_reached`, `valid_partial`, `empty_or_invalid`, or `pending`)
-
-Use this QA output before deciding which categories should be exposed commercially.
-
-## Important limitation about contacts
-
-This Actor should be positioned as an **Italian companies registry dataset scraper**, not as an email lead scraper.
-
-aziende.it rarely exposes real email, PEC, phone or website fields on company detail pages. These fields are included in the output schema because they may appear in some cases, but they are often null.
-
-For email, PEC, phone or website discovery at scale, use a separate contact-enrichment workflow after exporting this dataset.
+Set **Maximum results per category** to `0` to disable category-level balancing and use only the global **Maximum results** limit.
 
 ## Input fields
 
@@ -105,42 +102,44 @@ For email, PEC, phone or website discovery at scale, use a separate contact-enri
 
 Main business category to scrape.
 
-Supported examples:
+Validated values:
 
 - `informatica`
 - `software`
 - `consulenza`
 - `marketing`
-- `alimentare`
-- `tessile`
 - `edilizia`
 - `immobiliare`
-- `ristorazione`
-- `trasporti`
 - `turismo`
-- `meccanica`
+- `trasporti`
 
 ### Additional categories
 
-Optional list of extra categories to merge into the same dataset.
+Optional extra categories to merge into the same dataset.
 
 Example:
 
 ```json
-["software", "consulenza"]
+["software", "consulenza", "marketing"]
 ```
-
-### Test all preset categories
-
-QA/testing option. Runs all preset categories. Use this mainly while validating the Actor, not for normal production scraping.
 
 ### Maximum results per category
 
-Optional category-level limit. Use `1` or `2` for quick validation runs. Leave it set to `0` for normal production scraping.
+Optional category-level limit.
+
+Use it when scraping more than one category and you want balanced results.
+
+Examples:
+
+- `0`: disabled
+- `100`: up to 100 companies per category
+- `1000`: up to 1,000 companies per category
 
 ### Maximum results
 
-Maximum number of companies to save overall.
+Overall maximum number of companies to save.
+
+This always acts as a global safety cap.
 
 ### Include company details
 
@@ -151,7 +150,15 @@ Optional checkbox.
 
 ### Try website contact enrichment
 
-Advanced optional setting. If a company website is found, the Actor can try to inspect it for public contact data. This is usually slow and often returns few results because company websites are rarely exposed by the source.
+Advanced optional setting.
+
+If a real company website is found, the Actor can try to inspect it for public contact data. This is slower and often returns few results because aziende.it rarely exposes company websites.
+
+### Scrape all validated categories
+
+Runs all validated preset categories.
+
+Recommended only when you want a broad dataset. Use it with **Maximum results per category** to avoid one large category dominating the output.
 
 ### Advanced category URLs
 
@@ -163,7 +170,24 @@ Optional direct aziende.it category URLs for users who want to bypass the preset
 {
   "category": "informatica",
   "categories": ["software"],
+  "maxItemsPerCategory": 0,
   "maxItems": 5000,
+  "includeDetails": false,
+  "includeWebsiteContacts": false,
+  "proxyConfig": {
+    "useApifyProxy": true
+  }
+}
+```
+
+## Example: balanced multi-category run
+
+```json
+{
+  "category": "software",
+  "categories": ["marketing", "edilizia", "immobiliare"],
+  "maxItemsPerCategory": 1000,
+  "maxItems": 4000,
   "includeDetails": false,
   "includeWebsiteContacts": false,
   "proxyConfig": {
@@ -176,8 +200,9 @@ Optional direct aziende.it category URLs for users who want to bypass the preset
 
 ```json
 {
-  "category": "informatica",
-  "categories": ["software"],
+  "category": "software",
+  "categories": ["consulenza"],
+  "maxItemsPerCategory": 250,
   "maxItems": 500,
   "includeDetails": true,
   "includeWebsiteContacts": false,
@@ -189,50 +214,49 @@ Optional direct aziende.it category URLs for users who want to bypass the preset
 
 For this full-detail example, set the run timeout to at least 900 seconds.
 
-## Output fields
+## Output schema
 
-The dataset table uses English labels for international buyers. Raw source-compatible field keys may still use Italian names internally.
+The dataset table uses English labels for international buyers. Raw field keys are source-compatible and may use Italian names internally.
 
-| Dataset label | Raw field | Description |
-|---|---|---|
-| Company name | `ragioneSociale` | Legal/company name |
-| Revenue range | `fatturato` | Revenue range from the source |
-| Revenue min EUR | `fatturatoMinEur` | Parsed lower revenue estimate |
-| Revenue max EUR | `fatturatoMaxEur` | Parsed upper revenue estimate |
-| ATECO code | `ateco` | Italian business activity code |
-| Province | `provincia` | Italian province |
-| City | `citta` | City |
-| Source category | `categoria` | Source category label |
-| Source detail page | `detailUrl` | Company detail page URL |
-| VAT number | `partitaIva` | Italian VAT number, detail mode |
-| Address | `indirizzo` | Company address, detail mode |
-| Postal code | `cap` | Italian postal code, detail mode |
-| Employees | `dipendenti` | Employee range, detail mode |
-| Tax code | `codiceFiscale` | Tax code, when available |
-| REA | `rea` | REA registry number, when available |
-| Phone | `telefono` | Phone, rarely available |
-| Email | `email` | Email, rarely available |
-| PEC | `pec` | Certified email, rarely available |
-| Website | `sitoWeb` | Website, rarely available |
-| Legal form | `formaGiuridica` | Legal form, when available |
-| Activity status | `statoAttivita` | Activity status, when available |
-| Foundation date | `dataCostituzione` | Foundation/incorporation date, when available |
-| Details included | `detailScraped` | Boolean flag indicating whether detail enrichment was performed |
+| Dataset label | Raw field | Mode | Description |
+|---|---|---|---|
+| Company name | `ragioneSociale` | Listing | Legal/company name |
+| Requested category | `categoryKey` | Listing | User-selected/preset category key |
+| Revenue range | `fatturato` | Listing | Revenue range from the source |
+| Revenue min EUR | `fatturatoMinEur` | Listing | Parsed lower revenue estimate |
+| Revenue max EUR | `fatturatoMaxEur` | Listing | Parsed upper revenue estimate |
+| ATECO code | `ateco` | Listing | Italian business activity code |
+| Province | `provincia` | Listing | Italian province |
+| City | `citta` | Listing | City |
+| Source category label | `categoria` | Listing | Category label shown by the source |
+| Company detail page | `detailUrl` | Listing | Company detail page URL |
+| VAT number | `partitaIva` | Details | Italian VAT number, when detail mode is enabled |
+| Address | `indirizzo` | Details | Company address, when detail mode is enabled |
+| Postal code | `cap` | Details | Italian postal code, when detail mode is enabled |
+| Employees | `dipendenti` | Details | Employee range, when detail mode is enabled |
+| Tax code | `codiceFiscale` | Details | Tax code, when available |
+| REA | `rea` | Details | REA registry number, when available |
+| Phone | `telefono` | Rare | Phone, rarely available from the source |
+| Email | `email` | Rare | Email, rarely available from the source |
+| PEC | `pec` | Rare | Certified email, rarely available from the source |
+| Website | `sitoWeb` | Rare | Website, rarely available from the source |
+| Legal form | `formaGiuridica` | Details | Legal form, when available |
+| Activity status | `statoAttivita` | Details | Activity status, when available |
+| Foundation date | `dataCostituzione` | Details | Foundation/incorporation date, when available |
+| Source category URL | `sourceCategoryUrl` | Listing | aziende.it category URL used as source |
+| Details included | `detailScraped` | System | Boolean flag indicating whether detail enrichment was performed |
 
-## Practical use cases
+## Important limitation about contacts
 
-- Build a list of companies by Italian business sector
-- Create market maps by city, province, category or ATECO code
-- Estimate company size using revenue and employee ranges
-- Prepare CRM imports before contact enrichment
-- Analyze regional business density
-- Source companies for B2B sales research
-- Build datasets for AI, BI dashboards or business intelligence workflows
-- Find companies in specific industries for partnership, investment or supplier research
+This Actor should be positioned as an **Italian company registry dataset scraper**, not as an email scraper.
+
+azienda.it rarely exposes real email, PEC, phone or website fields on company detail pages. These fields are included in the output schema because they may appear in some cases, but they are often null.
+
+For email, PEC, phone or website discovery at scale, use a separate contact-enrichment workflow after exporting this dataset.
 
 ## Performance guidance
 
-Listing-only mode is much faster and is the recommended default for large datasets.
+Listing-only mode is the recommended default for large datasets.
 
 Full-detail mode is useful when VAT number, address, postal code and employee range are required, but it is slower because every company requires an additional detail-page request.
 
@@ -242,7 +266,7 @@ Current tested speed for full-detail enrichment is roughly **100 enriched compan
 
 Recommended product positioning:
 
-> Extract structured Italian company registry-style data by business category, including company name, revenue range, ATECO code, location and optional VAT/address/employee enrichment.
+> Extract structured Italian company data by validated business category, including company name, revenue range, ATECO code, location and optional VAT/address/employee enrichment.
 
 Avoid positioning this Actor as:
 
