@@ -490,6 +490,7 @@ const listingCrawler = new CheerioCrawler({
 
         if (summary.rowsParsed === 0 && summary.pagesFinished > 0) summary.status = 'empty_or_invalid';
         else if (summary.recordsCollected > 0) summary.status = targetReached(categoryKey) ? 'quota_reached' : 'valid_partial';
+        else if (summary.rowsParsed > 0) summary.status = 'skipped_quota';
 
         log.info(`[listing p${pageNum}] ${categoryKey} rows=${rows.length} collected=${listingRecords.length}/${maxItems} categoryCollected=${categoryCounts.get(categoryKey) || 0}${perCategoryLimit ? `/${perCategoryLimit}` : ''} pagesFinished=${listingPagesFinished} — ${categoryUrl}`);
     },
