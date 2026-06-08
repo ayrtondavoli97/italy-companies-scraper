@@ -6,7 +6,7 @@
         "category": {
             "title": "Business category",
             "type": "string",
-            "description": "Choose a simple Italian business category. Supported examples: informatica, software, consulenza, marketing, alimentare, tessile, edilizia, immobiliare, ristorazione, trasporti, turismo, meccanica.",
+            "description": "Choose a simple Italian business category. Use 'all' only for category validation tests, not for production scraping. Supported examples: informatica, software, consulenza, marketing, alimentare, tessile, edilizia, immobiliare, ristorazione, trasporti, turismo, meccanica.",
             "editor": "textfield",
             "default": "informatica"
         },
@@ -17,10 +17,24 @@
             "editor": "stringList",
             "default": []
         },
+        "allCategories": {
+            "title": "Test all preset categories",
+            "type": "boolean",
+            "description": "QA/testing option. When enabled, the Actor runs all preset categories. Combine it with 'Maximum results per category' set to 1 or 2 to validate which presets return data.",
+            "default": false
+        },
+        "maxItemsPerCategory": {
+            "title": "Maximum results per category",
+            "type": "integer",
+            "description": "Optional QA/segmentation limit. Set to 1 or 2 when testing all categories. Leave empty or 0 for normal production scraping controlled by Maximum results.",
+            "default": 0,
+            "minimum": 0,
+            "maximum": 100000
+        },
         "maxItems": {
             "title": "Maximum results",
             "type": "integer",
-            "description": "Maximum number of companies to save. Listing-only runs are fast. Full-detail runs are slower because each company detail page must be opened.",
+            "description": "Maximum number of companies to save overall. Listing-only runs are fast. Full-detail runs are slower because each company detail page must be opened.",
             "default": 5000,
             "minimum": 1,
             "maximum": 500000
