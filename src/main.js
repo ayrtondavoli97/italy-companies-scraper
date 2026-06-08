@@ -1,25 +1,30 @@
 /**
- * Italy Companies Scraper v6
+ * Italy Companies Scraper v7
  * Source: registroimprese.it — "Ricerca libera e acquisto" (official CCIAA registry)
  * Mode:   LISTING ONLY (no detail / no PEC) — base to iterate on.
  *
- * Strategy:
- *   - Free-text search: the keyword can be a CATEGORY (es. "INFORMATICA"),
- *     a company name, or an ATECO code/description. The portlet matches it
- *     against name + activity description + ATECO.
- *   - Geographic segmentation to beat the result cap: search is repeated per
- *     province (from `regione` expansion or a single `provincia`). Without a
- *     geo filter it runs one "Tutta Italia" pass (will hit the portlet cap).
- *   - Pagination by FOLLOWING the "Successivo" link, which carries the
- *     pageToken of the next page (a Liferay JWT). We never build tokens.
+ * Real search mechanics (reverse-engineered from the landing form):
+ *   - Search portlet:  RiRicercaImpreseGratuitaPortlet  (the form)
+ *   - Results portlet: RiRisultatiRicercaImpreseGratuitaPortlet (renders rows)
+ *   - The form is a POST to a Liferay ACTION url (p_p_lifecycle=1,
+ *     javax.portlet.action=cerca) that carries a per-session p_auth token.
+ *   - Fields: inputSearchField + filtroInputSearchField = search term;
+ *     filtroProvincia = 2-letter province code (e.g. "NA"); soloNonCancellate=S;
+ *     filtroScore=S; captchaResp = reCAPTCHA v3 token (EMPTY here — see note).
  *
- * HTTP-only (CheerioCrawler / got-scraping). The results page is server-side
- * rendered, so no browser is needed. The Didomi consent banner is a JS overlay
- * and does not affect HTTP requests.
+ * Flow: GET landing -> read desktop searchForm (action+p_auth, namespace, all
+ * hidden inputs) -> POST form-urlencoded -> follow 302 to the rendered results
+ * -> parse rows -> follow "Successivo".
  *
- * RECON: on the first results page per province we dump the raw HTML to the
- * KV Store (debug=true) so the row selectors and the exact search params can
- * be finalized against the real markup on the first Apify run.
+ * NOTE (reCAPTCHA v3): the page loads grecaptcha with render=<sitekey> and mints
+ * captchaResp via JS on submit. We POST with an EMPTY captchaResp. This run is
+ * the test of whether the server enforces the v3 score on free search. If it
+ * blocks, the next step is minting a token (browser) or a solver — but try
+ * HTTP-only first because per-solve cost would wreck the unit economics.
+ *
+ * HTTP-only (CheerioCrawler / got-scraping); results are server-side rendered.
+ * RECON: with debug=true we dump landing + first results HTML to the KV Store
+ * to finalize the row selectors against real markup.
  */
 
 import { Actor } from 'apify';
@@ -121,20 +126,6 @@ console.log(`Term="${searchTerm}" | province=${provinces.map(p => p.code || 'IT'
 let collected = 0;
 const seen = new Set();
 
-/** Build the search URL. Param names are the best reconstruction of the Liferay
- *  portlet render request; finalized on first run from the dumped landing form. */
-function buildSearchUrl({ token, term, provName }) {
-    const params = new URLSearchParams({
-        p_p_id: PORTLET_ID,
-        p_p_lifecycle: '0',
-        p_p_state: 'normal',
-    });
-    if (token) params.set(`${NS}pageToken`, token);
-    params.set(`${NS}keyword`, term);
-    if (provName) params.set(`${NS}provincia`, provName);
-    return `${BASE}${SEARCH_PATH}?${params.toString()}`;
-}
-
 const crawler = new CheerioCrawler({
     proxyConfiguration,
     useSessionPool: true,
@@ -156,33 +147,53 @@ const crawler = new CheerioCrawler({
     async requestHandler({ $, request, body, log, addRequests }) {
         const { label, prov, provName, term, pageNum } = request.userData;
 
-        // ---- LANDING: capture token + discover the real form params -------
+        // ---- LANDING: read the desktop searchForm and POST it -------------
         if (label === 'LANDING') {
             const html = typeof body === 'string' ? body : body.toString();
-
-            // Token from a link/hidden field on the landing page.
-            const m = html.match(new RegExp(`${NS}pageToken=([A-Za-z0-9._\\-]+)`));
-            const token = m ? m[1] : null;
-
-            // Discover the search form's real input names (so we stop guessing).
-            const forms = [];
-            $('form').each((_, f) => {
-                const inputs = [];
-                $(f).find('input,select,textarea').each((__, el) => {
-                    const name = $(el).attr('name');
-                    if (name) inputs.push({ name, type: $(el).attr('type') || el.tagName });
-                });
-                forms.push({ action: $(f).attr('action') || '', method: $(f).attr('method') || 'get', inputs });
-            });
-            log.info(`[${prov || 'IT'}] LANDING token=${token ? 'ok' : 'MISSING'} | forms=${JSON.stringify(forms).slice(0, 1200)}`);
-
             if (debug) {
                 await Actor.setValue(`landing_${prov || 'IT'}.html`, html, { contentType: 'text/html; charset=utf-8' });
             }
 
+            // Desktop form (name ends with _searchForm, not _searchFormMob).
+            let $form = $('form[name$="_searchForm"]').first();
+            if ($form.length === 0) $form = $('form[name$="_searchFormMob"]').first();
+            if ($form.length === 0) {
+                log.error(`[${prov || 'IT'}] searchForm not found on landing — site layout changed.`);
+                return;
+            }
+
+            const action = ($form.attr('action') || '').replace(/&amp;/g, '&');
+            const ns = $form.attr('data-fm-namespace') || NS;
+            const pAuth = (action.match(/[?&]p_auth=([^&]+)/) || [])[1] || null;
+
+            // Carry over every hidden/text field exactly as the page set them.
+            const payload = new URLSearchParams();
+            $form.find('input, select, textarea').each((_, el) => {
+                const name = $(el).attr('name');
+                if (!name) return;
+                payload.set(name, $(el).attr('value') || '');
+            });
+            // Overrides: the search term + province (code) + flags.
+            payload.set(`${ns}inputSearchField`, term);
+            payload.set(`${ns}filtroInputSearchField`, term);
+            payload.set(`${ns}filtroProvincia`, prov || ''); // '' = Tutta Italia
+            payload.set(`${ns}soloNonCancellate`, 'S');
+            payload.set(`${ns}filtroScore`, 'S');
+            payload.set(`${ns}captchaResp`, ''); // reCAPTCHA v3 — empty, see header note
+
+            log.info(`[${prov || 'IT'}] POST search term="${term}" p_auth=${pAuth ? 'ok' : 'MISSING'} fields=${[...payload.keys()].length}`);
+
             await addRequests([{
-                url: buildSearchUrl({ token, term, provName }),
+                url: action,
+                method: 'POST',
+                payload: payload.toString(),
+                headers: {
+                    'content-type': 'application/x-www-form-urlencoded',
+                    'referer': `${BASE}${SEARCH_PATH}`,
+                    'origin': BASE,
+                },
                 userData: { label: 'RESULTS', prov, provName, term, pageNum: 1 },
+                uniqueKey: `search-${prov || 'IT'}-${term}-${Date.now()}`,
             }]);
             return;
         }
@@ -191,6 +202,16 @@ const crawler = new CheerioCrawler({
         const html = typeof body === 'string' ? body : body.toString();
         if (debug && pageNum === 1) {
             await Actor.setValue(`results_${prov || 'IT'}_p1.html`, html, { contentType: 'text/html; charset=utf-8' });
+        }
+
+        // Diagnostics: did the search actually execute, or did we get the form back?
+        const executed = /hai cercato/i.test(html) || /risultati/i.test($('body').text());
+        const looksLikeForm = $('form[name$="_searchForm"]').length > 0 && !/hai cercato/i.test(html);
+        if (pageNum === 1) {
+            log.info(`[${prov || 'IT'}] results page: executed=${executed} looksLikeForm=${looksLikeForm} finalUrl=${request.loadedUrl || request.url}`);
+            if (looksLikeForm) {
+                log.warning(`[${prov || 'IT'}] got the form back, not results — likely reCAPTCHA v3 block or rejected POST. Inspect results_${prov || 'IT'}_p1.html.`);
+            }
         }
 
         const rows = parseListing($, { prov });
@@ -233,27 +254,37 @@ const crawler = new CheerioCrawler({
 
 /**
  * Parse one results page into listing rows.
- * NOTE: selectors are best-effort and will be finalized from the dumped HTML
- * (results_*_p1.html) after the first Apify run. We log candidate selectors so
- * we immediately see which structure matched.
+ * NOTE: selectors are still best-effort. The rows render inside the
+ * RiRisultatiRicercaImpreseGratuitaPortlet container; we scope there and log
+ * candidate-selector counts so the real row structure is obvious from the logs.
+ * Finalized against results_*_p1.html after this run.
  */
 function parseListing($, { prov }) {
     const out = [];
 
-    // Candidate containers for a single result row.
-    const candidateSelectors = [
+    // Scope to the results portlet if present, else whole doc.
+    let $scope = $('[id*="RiRisultatiRicercaImpreseGratuita"]');
+    if ($scope.length === 0) $scope = $.root();
+
+    // Probe candidate row containers and log their counts (recon aid).
+    const candidates = [
+        'table tbody tr',
         '[class*="risultat"] [class*="row"]',
         '[class*="result"] [class*="item"]',
-        'table tbody tr',
+        '[class*="elenco"] [class*="row"]',
         'li[class*="item"]',
+        'div[class*="card"]',
     ];
+    const probe = candidates.map(sel => `${sel}=${$scope.find(sel).length}`);
+    console.log(`parseListing probe [${prov || 'IT'}]: ${probe.join(' | ')}`);
+
     let chosen = null;
-    for (const sel of candidateSelectors) {
-        if ($(sel).length > 0) { chosen = sel; break; }
+    for (const sel of candidates) {
+        if ($scope.find(sel).length > 0) { chosen = sel; break; }
     }
     if (!chosen) return out;
 
-    $(chosen).each((_, el) => {
+    $scope.find(chosen).each((_, el) => {
         const cells = $(el).find('td');
         if (cells.length >= 4) {
             // Table layout: Nome | Sede | Comune | Forma | Descrizione | Stato
