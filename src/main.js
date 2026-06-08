@@ -1,11 +1,10 @@
 /**
- * Aziende.it Scraper v10.3
+ * Aziende.it Scraper v10.4
  *
  * Scrapes Italian company listings from aziende.it by simple business category
  * names or direct category URLs. Optional detail scraping enriches each company
- * with fields discovered on the detail page. If a real external website is found,
- * the actor can also inspect the homepage/contact page to recover public email,
- * phone and website data where available.
+ * with fields discovered on the detail page. Fast mode discovers listing pages in
+ * parallel and uses configurable concurrency to collect more data faster.
  */
 
 import { Actor } from 'apify';
@@ -26,6 +25,8 @@ const {
     maxPagesPerCategory = 200,
     includeDetails = true,
     includeWebsiteContacts = true,
+    maxConcurrency = includeDetails ? 16 : 24,
+    parallelPageDiscovery = true,
     debug = false,
     proxyConfig: proxyConfigInput,
 } = input;
@@ -130,13 +131,14 @@ if (urls.length === 0) {
 }
 
 const proxyConfiguration = proxyConfigInput ? await Actor.createProxyConfiguration(proxyConfigInput) : undefined;
-console.log(`Categorie URL: ${urls.length} | maxItems=${maxItems} | maxPagesPerCategory=${maxPagesPerCategory} | includeDetails=${includeDetails} | includeWebsiteContacts=${includeWebsiteContacts}`);
+console.log(`Categorie URL: ${urls.length} | maxItems=${maxItems} | maxPagesPerCategory=${maxPagesPerCategory} | includeDetails=${includeDetails} | includeWebsiteContacts=${includeWebsiteContacts} | maxConcurrency=${maxConcurrency} | parallelPageDiscovery=${parallelPageDiscovery}`);
 
 let savedItems = 0;
 let scheduledDetails = 0;
 const seenListingUrls = new Set();
 const seenDetailUrls = new Set();
 const seenContactUrls = new Set();
+const expandedCategoryUrls = new Set();
 
 function outputBudgetUsed() {
     return savedItems + scheduledDetails;
@@ -146,6 +148,19 @@ function withPage(rawUrl, n) {
     const u = new URL(rawUrl);
     u.searchParams.set('pag', String(n));
     return u.toString();
+}
+
+function parseTotalResults(body) {
+    const html = typeof body === 'string' ? body : body.toString();
+    const match = html.match(/Totale risultati:\s*([\d.]+)/i);
+    if (!match) return null;
+    return Number(match[1].replace(/\./g, '')) || null;
+}
+
+function categoryPageLimit(totalResults) {
+    const totalPages = totalResults ? Math.ceil(totalResults / 25) : maxPagesPerCategory;
+    const budgetPages = Math.ceil(maxItems / 25) + urls.length;
+    return Math.max(1, Math.min(maxPagesPerCategory, totalPages, budgetPages));
 }
 
 const NON_COMPANY = /^\/(categorie|ateco|localita|fatturato|elenco|servizi|blog|about|login|p|down_loads|noRegistrazione|img|download)\b/i;
@@ -412,7 +427,7 @@ async function pushCompany(record) {
 const crawler = new CheerioCrawler({
     proxyConfiguration,
     useSessionPool: true,
-    maxConcurrency: includeDetails ? 6 : 4,
+    maxConcurrency,
     maxRequestRetries: 2,
     requestHandlerTimeoutSecs: 45,
     additionalMimeTypes: ['text/html'],
@@ -422,7 +437,7 @@ const crawler = new CheerioCrawler({
                 ...request.headers,
                 'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/10.3; +https://apify.com/)'
+                'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/10.4; +https://apify.com/)'
             };
         },
     ],
@@ -497,9 +512,9 @@ const crawler = new CheerioCrawler({
             if (t && t.length > categoria.length && t.length < 120 && !/aziende con codice/i.test(t)) categoria = t;
         });
 
+        const totalResults = pageNum === 1 ? parseTotalResults(body) : null;
         if (pageNum === 1) {
-            const m = (typeof body === 'string' ? body : body.toString()).match(/Totale risultati:\s*([\d.]+)/i);
-            log.info(`[${categoryUrl}] Totale risultati: ${m ? m[1] : '?'}`);
+            log.info(`[${categoryUrl}] Totale risultati: ${totalResults ?? '?'}`);
         }
 
         const rows = parseRows($, categoria);
@@ -527,9 +542,28 @@ const crawler = new CheerioCrawler({
 
         if (detailRequests.length) await addRequests(detailRequests);
 
+        if (parallelPageDiscovery && pageNum === 1 && !expandedCategoryUrls.has(categoryUrl)) {
+            expandedCategoryUrls.add(categoryUrl);
+            const limit = categoryPageLimit(totalResults);
+            const pageRequests = [];
+            for (let p = 2; p <= limit; p++) {
+                pageRequests.push({
+                    url: withPage(categoryUrl, p),
+                    userData: { label: 'CATEGORY', categoryUrl, pageNum: p },
+                    uniqueKey: `${categoryUrl}::pag=${p}`,
+                });
+            }
+            if (pageRequests.length) {
+                await addRequests(pageRequests);
+                log.info(`[${categoryUrl}] scheduled ${pageRequests.length} pages in parallel.`);
+            }
+            return;
+        }
+
         if (outputBudgetUsed() >= maxItems) { log.info('maxItems reached.'); return; }
         if (rows.length === 0) { log.info(`[${categoryUrl}] no rows on p${pageNum} — end.`); return; }
         if (pageNum >= maxPagesPerCategory) { log.info(`[${categoryUrl}] maxPagesPerCategory reached.`); return; }
+        if (parallelPageDiscovery && expandedCategoryUrls.has(categoryUrl)) return;
 
         await addRequests([{
             url: withPage(categoryUrl, pageNum + 1),
