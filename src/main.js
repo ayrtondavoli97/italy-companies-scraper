@@ -1,5 +1,5 @@
 /**
- * Aziende.it Scraper v10.2
+ * Aziende.it Scraper v10.3
  *
  * Scrapes Italian company listings from aziende.it by simple business category
  * names or direct category URLs. Optional detail scraping enriches each company
@@ -292,8 +292,11 @@ function cleanPhone(value, partitaIva = '') {
     if (!match) return null;
     const phone = normalizeText(match[0]);
     const digits = phone.replace(/\D/g, '');
-    if (digits.length < 6 || digits.length > 13) return null;
-    if (partitaIva && digits.endsWith(partitaIva.replace(/\D/g, ''))) return null;
+    const piva = String(partitaIva || '').replace(/\D/g, '');
+    if (digits.length < 9 || digits.length > 13) return null;
+    if (digits.startsWith('3') && digits.length !== 10) return null;
+    if (digits.startsWith('0') && (digits.length < 9 || digits.length > 11)) return null;
+    if (piva && (piva.includes(digits) || digits.includes(piva))) return null;
     return phone;
 }
 
@@ -330,7 +333,8 @@ function parseJsonLd($) {
     return result;
 }
 
-function extractContactData($, body, pageUrl, partitaIva = '') {
+function extractContactData($, body, pageUrl, partitaIva = '', options = {}) {
+    const { scanTextPhone = false } = options;
     const text = normalizeText(typeof body === 'string' ? body : body.toString());
     const mailtoEmails = $('a[href^="mailto:"]').map((_, a) => $(a).attr('href')?.replace(/^mailto:/i, '').split('?')[0]).get();
     const cfEmails = $('a.__cf_email__, span.__cf_email__').map((_, el) => decodeCloudflareEmail($(el).attr('data-cfemail'))).get().filter(Boolean);
@@ -338,7 +342,7 @@ function extractContactData($, body, pageUrl, partitaIva = '') {
     const pec = emails.find(e => /pec|legalmail|postacert|cert/i.test(e)) || null;
     const email = emails.find(e => e !== pec) || null;
     const telHref = $('a[href^="tel:"]').map((_, a) => $(a).attr('href')?.replace(/^tel:/i, '')).get().map(v => cleanPhone(v, partitaIva)).find(Boolean) || null;
-    const telefono = telHref || cleanPhone(text, partitaIva);
+    const telefono = telHref || (scanTextPhone ? cleanPhone(text, partitaIva) : null);
     const sitoWeb = cleanWebsite(pageUrl);
     return { email, pec, telefono, sitoWeb };
 }
@@ -372,7 +376,7 @@ function parseDetail($, body) {
         || pickByRegex(text, /(?:Codice\s*fiscale|C\.?\s*F\.?)\s*[:\-]?\s*([A-Z0-9]{11,16})/i);
 
     const indirizzo = jsonLd.indirizzo || findLabel(pairs, ['Sede legale', 'Indirizzo', 'Sede']) || null;
-    const detailContacts = extractContactData($, body, BASE, partitaIva);
+    const detailContacts = extractContactData($, body, BASE, partitaIva, { scanTextPhone: false });
     const labelEmail = cleanEmail(findLabel(pairs, ['Email', 'E-mail']));
     const labelWebsite = cleanWebsite(findLabel(pairs, ['Sito web', 'Website']));
     const websiteHref = $('a[href^="http"]').map((_, a) => $(a).attr('href')).get().map(h => cleanWebsite(h)).find(Boolean) || null;
@@ -418,7 +422,7 @@ const crawler = new CheerioCrawler({
                 ...request.headers,
                 'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/10.2; +https://apify.com/)'
+                'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/10.3; +https://apify.com/)'
             };
         },
     ],
@@ -428,7 +432,7 @@ const crawler = new CheerioCrawler({
 
         if (label === 'CONTACT_HOME' || label === 'CONTACT_PAGE') {
             const base = request.userData.company ?? {};
-            const contacts = extractContactData($, body, request.url, base.partitaIva);
+            const contacts = extractContactData($, body, request.url, base.partitaIva, { scanTextPhone: true });
             const merged = {
                 ...base,
                 email: base.email || contacts.email,
