@@ -65,15 +65,17 @@ function isCompanyHref(href) {
 
 function parseRows($, categoria) {
     const out = [];
-    $('tr').each((_, tr) => {
-        const $tr = $(tr);
-        const $a = $tr.find('a').filter((__, a) => isCompanyHref($(a).attr('href'))).first();
+    // Each company is a Bootstrap grid row: div.row.border-bottom with 5 col-* divs:
+    // [0]=name(<a>), [1]=fatturato, [2]=ateco, [3]=provincia, [4]=citta
+    $('div.row.border-bottom').each((_, row) => {
+        const $row = $(row);
+        const cols = $row.children('div');
+        if (cols.length < 5) return;
+        const $a = $row.find('a').filter((__, a) => isCompanyHref($(a).attr('href'))).first();
         if ($a.length === 0) return;
-        const tds = $tr.find('td');
-        if (tds.length < 5) return;
-        const txt = i => $(tds[i]).text().replace(/\s+/g, ' ').trim();
-        const name = $a.text().replace(/\s+/g, ' ').trim() || txt(0);
+        const name = $a.text().replace(/\s+/g, ' ').trim();
         if (!name || name.length < 2) return;
+        const txt = i => $(cols[i]).text().replace(/\s+/g, ' ').trim();
         const href = $a.attr('href');
         out.push({
             ragioneSociale: name,
