@@ -473,9 +473,12 @@ const listingCrawler = new CheerioCrawler({
             if (targetReached(categoryKey)) break;
             if (!row.detailUrl) continue;
 
-            const seenKey = categoryQuotaMode ? `${categoryKey}::${row.detailUrl}` : row.detailUrl;
-            if (seenGlobalDetailUrls.has(seenKey)) continue;
-            seenGlobalDetailUrls.add(seenKey);
+            // Always dedup globally by detailUrl so a company shared across
+            // overlapping categories (e.g. informatica/software/consulenza all
+            // map to ATECO 62.0x / 63.11.1) is never saved twice. Per-category
+            // quota still counts unique saves toward each category's cap.
+            if (seenGlobalDetailUrls.has(row.detailUrl)) continue;
+            seenGlobalDetailUrls.add(row.detailUrl);
 
             const record = {
                 ...row,
