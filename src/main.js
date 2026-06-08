@@ -1,12 +1,13 @@
 /**
- * Aziende.it Scraper v11.1
+ * Aziende.it Scraper v11.3
  *
- * Two-phase architecture with bounded listing discovery:
- * 1) Listing phase collects only the amount of category pages needed for maxItems.
- * 2) Detail phase enriches the collected company URLs with a separate controlled crawler.
+ * Production mode:
+ * - Fast listing by default.
+ * - Optional details enrichment.
  *
- * This avoids the v11.0 issue where hundreds of listing pages were still processed
- * after maxItems had already been collected.
+ * Category QA mode:
+ * - allCategories=true tests every preset category.
+ * - maxItemsPerCategory limits records per category, useful for validating presets.
  */
 
 import { Actor } from 'apify';
@@ -22,22 +23,26 @@ const input = (await Actor.getInput()) ?? {};
 const {
     category = DEFAULT_CATEGORY,
     categories = [],
+    allCategories = false,
+    maxItemsPerCategory = null,
     startUrls = [],
     maxItems = 5000,
     maxPagesPerCategory = 200,
-    includeDetails = true,
+    includeDetails = false,
     includeWebsiteContacts = false,
     dataDepth: rawDataDepth,
     listingConcurrency = 24,
-    detailConcurrency = 10,
+    detailConcurrency = 16,
     listingMaxRequestsPerMinute = 240,
-    detailMaxRequestsPerMinute = 110,
+    detailMaxRequestsPerMinute = 170,
     debug = false,
     proxyConfig: proxyConfigInput,
 } = input;
 
 const dataDepth = rawDataDepth || (includeDetails ? 'full' : 'listing');
 const shouldScrapeDetails = dataDepth !== 'listing';
+const perCategoryLimit = Number(maxItemsPerCategory) > 0 ? Number(maxItemsPerCategory) : null;
+const categoryQuotaMode = Boolean(perCategoryLimit);
 
 const CATEGORY_PRESETS = {
     informatica: [
@@ -98,31 +103,45 @@ const normalizeText = value => String(value ?? '').replace(/\s+/g, ' ').trim();
 const normalizeKey = value => normalizeText(value).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
 const asArray = value => Array.isArray(value) ? value : (value === undefined || value === null || value === '' ? [] : [value]);
 
-function resolveCategoryUrls() {
-    const directUrls = asArray(startUrls).map(u => (typeof u === 'string' ? u : u?.url)).filter(Boolean);
-    const names = [...asArray(category), ...asArray(categories)].map(normalizeKey).filter(Boolean);
-    const resolved = [];
+function resolveCategoryTargets() {
+    const directUrls = asArray(startUrls).map((u, i) => {
+        const url = typeof u === 'string' ? u : u?.url;
+        return url ? { categoryKey: `custom-${i + 1}`, url } : null;
+    }).filter(Boolean);
 
+    const names = allCategories
+        ? Object.keys(CATEGORY_PRESETS)
+        : [...asArray(category), ...asArray(categories)].map(normalizeKey).filter(Boolean);
+
+    const targets = [];
     for (const name of names.length ? names : [DEFAULT_CATEGORY]) {
-        if (/^https?:\/\//i.test(name)) resolved.push(name);
-        else if (CATEGORY_PRESETS[name]) resolved.push(...CATEGORY_PRESETS[name]);
-        else {
+        if (/^https?:\/\//i.test(name)) {
+            targets.push({ categoryKey: 'custom', url: name });
+        } else if (CATEGORY_PRESETS[name]) {
+            CATEGORY_PRESETS[name].forEach(url => targets.push({ categoryKey: name, url }));
+        } else {
             console.warn(`Category "${name}" is not recognized. Falling back to informatica. Supported values: ${Object.keys(CATEGORY_PRESETS).join(', ')}`);
-            resolved.push(DEFAULT_CATEGORY_URL);
+            targets.push({ categoryKey: DEFAULT_CATEGORY, url: DEFAULT_CATEGORY_URL });
         }
     }
 
-    return [...new Set([...directUrls, ...resolved])];
+    const seen = new Set();
+    return [...directUrls, ...targets].filter(t => {
+        const key = `${t.categoryKey}::${t.url}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
 }
 
-const categoryUrls = resolveCategoryUrls();
-if (!categoryUrls.length) {
-    console.error('No valid category URL. Provide category, categories, or startUrls.');
+const categoryTargets = resolveCategoryTargets();
+if (!categoryTargets.length) {
+    console.error('No valid category URL. Provide category, categories, allCategories, or startUrls.');
     await Actor.exit(1);
 }
 
 const proxyConfiguration = proxyConfigInput ? await Actor.createProxyConfiguration(proxyConfigInput) : undefined;
-console.log(`Mode=${dataDepth} | categoryUrls=${categoryUrls.length} | maxItems=${maxItems} | maxPagesPerCategory=${maxPagesPerCategory} | listingConcurrency=${listingConcurrency} | detailConcurrency=${detailConcurrency} | listingRPM=${listingMaxRequestsPerMinute} | detailRPM=${detailMaxRequestsPerMinute} | includeWebsiteContacts=${includeWebsiteContacts}`);
+console.log(`Mode=${dataDepth} | allCategories=${allCategories} | categoryTargets=${categoryTargets.length} | maxItems=${maxItems} | maxItemsPerCategory=${perCategoryLimit ?? 'off'} | maxPagesPerCategory=${maxPagesPerCategory} | listingConcurrency=${listingConcurrency} | detailConcurrency=${detailConcurrency} | listingRPM=${listingMaxRequestsPerMinute} | detailRPM=${detailMaxRequestsPerMinute} | includeWebsiteContacts=${includeWebsiteContacts}`);
 
 function withPage(rawUrl, n) {
     const u = new URL(rawUrl);
@@ -136,10 +155,10 @@ function parseTotalResults(body) {
     return match ? Number(match[1].replace(/\./g, '')) || null : null;
 }
 
-function calculatePageLimit(totalResults) {
+function calculatePageLimit(totalResults, targetCount) {
     const totalPages = totalResults ? Math.ceil(totalResults / 25) : maxPagesPerCategory;
-    const pagesNeededPerCategory = Math.ceil(maxItems / Math.max(1, categoryUrls.length) / 25) + 3;
-    return Math.max(1, Math.min(maxPagesPerCategory, totalPages, pagesNeededPerCategory));
+    const needed = targetCount ? Math.ceil(targetCount / 25) + 1 : Math.ceil(maxItems / Math.max(1, categoryTargets.length) / 25) + 3;
+    return Math.max(1, Math.min(maxPagesPerCategory, totalPages, needed));
 }
 
 function normalizeUrl(href, base = BASE) {
@@ -203,16 +222,13 @@ function collectLabelValues($) {
         const $el = $(el);
         const text = normalizeText($el.text());
         if (!text || text.length > 500) return;
-
         const split = text.match(/^([^:]{2,80})\s*[:\-]\s*(.{1,350})$/);
         if (split) pairs.push({ label: normalizeKey(split[1]), value: normalizeText(split[2]) });
-
         const strong = normalizeText($el.find('strong,b,label,dt').first().text());
         if (strong) {
             const value = normalizeText(text.replace(strong, ''));
             if (value) pairs.push({ label: normalizeKey(strong), value });
         }
-
         if ($el.is('dt')) {
             const value = normalizeText($el.next('dd').text());
             if (value) pairs.push({ label: normalizeKey(text), value });
@@ -341,7 +357,6 @@ function parseDetail($, body) {
     const text = normalizeText(typeof body === 'string' ? body : body.toString());
     const pairs = collectLabelValues($);
     const jsonLd = parseJsonLd($);
-
     const partitaIvaRaw = findLabel(pairs, ['Partita IVA', 'P IVA', 'P.IVA']) || pickByRegex(text, /(?:Partita\s*IVA|P\.?\s*IVA)\s*[:\-]?\s*(\d{11})/i);
     const partitaIva = partitaIvaRaw.replace(/\D/g, '').slice(0, 11) || null;
     const codiceFiscaleRaw = findLabel(pairs, ['Codice fiscale', 'C F', 'C.F.']) || pickByRegex(text, /(?:Codice\s*fiscale|C\.?\s*F\.?)\s*[:\-]?\s*([A-Z0-9]{11,16})/i);
@@ -373,8 +388,30 @@ function needsWebsiteContactPass(company) {
 }
 
 const listingRecords = [];
-const seenDetailUrls = new Set();
+const categoryCounts = new Map();
+const categorySummary = new Map();
+const seenGlobalDetailUrls = new Set();
 let listingPagesFinished = 0;
+
+function getSummary(targetKey, categoryKey, categoryUrl) {
+    if (!categorySummary.has(targetKey)) {
+        categorySummary.set(targetKey, {
+            categoryKey,
+            categoryUrl,
+            totalResults: null,
+            pagesFinished: 0,
+            rowsParsed: 0,
+            recordsCollected: 0,
+            status: 'pending',
+        });
+    }
+    return categorySummary.get(targetKey);
+}
+
+function targetReached(categoryKey) {
+    if (!categoryQuotaMode) return listingRecords.length >= maxItems;
+    return (categoryCounts.get(categoryKey) || 0) >= perCategoryLimit;
+}
 
 const listingCrawler = new CheerioCrawler({
     proxyConfiguration,
@@ -390,16 +427,18 @@ const listingCrawler = new CheerioCrawler({
             ...request.headers,
             'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/11.1; +https://apify.com/)'
+            'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/11.3; +https://apify.com/)'
         };
     }],
 
     async requestHandler({ $, request, body, log, addRequests }) {
-        const { categoryUrl, pageNum } = request.userData;
+        const { categoryKey, categoryUrl, targetKey, pageNum } = request.userData;
+        const summary = getSummary(targetKey, categoryKey, categoryUrl);
+        summary.pagesFinished++;
         listingPagesFinished++;
 
         if (debug && pageNum === 1) {
-            const safe = (categoryUrl.split('/').pop() || 'cat').replace(/[^\w.-]/g, '_');
+            const safe = `${categoryKey}_${categoryUrl.split('/').pop() || 'cat'}`.replace(/[^\w.-]/g, '_');
             await Actor.setValue(`listing_${safe}_p1.html`, typeof body === 'string' ? body : body.toString(), { contentType: 'text/html; charset=utf-8' });
         }
 
@@ -411,38 +450,65 @@ const listingCrawler = new CheerioCrawler({
 
         if (pageNum === 1) {
             const totalResults = parseTotalResults(body);
-            const pageLimit = calculatePageLimit(totalResults);
+            summary.totalResults = totalResults;
+            const targetCount = categoryQuotaMode ? perCategoryLimit : null;
+            const pageLimit = calculatePageLimit(totalResults, targetCount);
             const pageRequests = [];
             for (let p = 2; p <= pageLimit; p++) {
                 pageRequests.push({
                     url: withPage(categoryUrl, p),
-                    userData: { label: 'LISTING', categoryUrl, pageNum: p },
-                    uniqueKey: `${categoryUrl}::pag=${p}`,
+                    userData: { label: 'LISTING', categoryKey, categoryUrl, targetKey, pageNum: p },
+                    uniqueKey: `${targetKey}::pag=${p}`,
                 });
             }
             if (pageRequests.length) await addRequests(pageRequests);
-            log.info(`[listing] ${categoryUrl} total=${totalResults ?? '?'} pageLimit=${pageLimit} scheduledPages=${pageRequests.length}`);
+            log.info(`[listing] ${categoryKey} | ${categoryUrl} total=${totalResults ?? '?'} pageLimit=${pageLimit} scheduledPages=${pageRequests.length}`);
         }
 
         const rows = parseRows($, categoria);
+        summary.rowsParsed += rows.length;
+
         for (const row of rows) {
             if (listingRecords.length >= maxItems) break;
-            if (!row.detailUrl || seenDetailUrls.has(row.detailUrl)) continue;
-            seenDetailUrls.add(row.detailUrl);
-            listingRecords.push(row);
+            if (targetReached(categoryKey)) break;
+            if (!row.detailUrl) continue;
+
+            const seenKey = categoryQuotaMode ? `${categoryKey}::${row.detailUrl}` : row.detailUrl;
+            if (seenGlobalDetailUrls.has(seenKey)) continue;
+            seenGlobalDetailUrls.add(seenKey);
+
+            const record = {
+                ...row,
+                categoryKey,
+                categoryUrl,
+                sourceCategoryUrl: categoryUrl,
+            };
+            listingRecords.push(record);
+            categoryCounts.set(categoryKey, (categoryCounts.get(categoryKey) || 0) + 1);
+            summary.recordsCollected++;
         }
 
-        log.info(`[listing p${pageNum}] rows=${rows.length} collected=${listingRecords.length}/${maxItems} pagesFinished=${listingPagesFinished} — ${categoryUrl}`);
+        if (summary.rowsParsed === 0 && summary.pagesFinished > 0) summary.status = 'empty_or_invalid';
+        else if (summary.recordsCollected > 0) summary.status = targetReached(categoryKey) ? 'quota_reached' : 'valid_partial';
+
+        log.info(`[listing p${pageNum}] ${categoryKey} rows=${rows.length} collected=${listingRecords.length}/${maxItems} categoryCollected=${categoryCounts.get(categoryKey) || 0}${perCategoryLimit ? `/${perCategoryLimit}` : ''} pagesFinished=${listingPagesFinished} — ${categoryUrl}`);
     },
 });
 
-const startRequests = categoryUrls.map(u => ({
-    url: withPage(u, 1),
-    userData: { label: 'LISTING', categoryUrl: u, pageNum: 1 },
-    uniqueKey: `${u}::pag=1`,
-}));
+const startRequests = categoryTargets.map((t, i) => {
+    const targetKey = `${t.categoryKey}::${i + 1}::${t.url}`;
+    getSummary(targetKey, t.categoryKey, t.url);
+    return {
+        url: withPage(t.url, 1),
+        userData: { label: 'LISTING', categoryKey: t.categoryKey, categoryUrl: t.url, targetKey, pageNum: 1 },
+        uniqueKey: `${targetKey}::pag=1`,
+    };
+});
 
 await listingCrawler.run(startRequests);
+const summaryArray = [...categorySummary.values()].map(s => ({ ...s }));
+await Actor.setValue('category-summary.json', summaryArray, { contentType: 'application/json; charset=utf-8' });
+console.log(`Category summary: ${JSON.stringify(summaryArray)}`);
 console.log(`Listing phase done. Collected ${listingRecords.length} companies.`);
 
 if (!shouldScrapeDetails) {
@@ -466,11 +532,35 @@ const detailCrawler = new CheerioCrawler({
             ...request.headers,
             'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/11.1-detail; +https://apify.com/)'
+            'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/11.3-detail; +https://apify.com/)'
         };
     }],
 
     async requestHandler({ $, request, body, addRequests, log }) {
+        if (request.userData.label === 'CONTACT_HOME' || request.userData.label === 'CONTACT_PAGE') {
+            const base = request.userData.company ?? {};
+            const contacts = extractContactData($, body, request.url, base.partitaIva, true);
+            const merged = {
+                ...base,
+                email: base.email || contacts.email,
+                pec: base.pec || contacts.pec,
+                telefono: base.telefono || contacts.telefono,
+                sitoWeb: base.sitoWeb || contacts.sitoWeb,
+                websiteContactScraped: true,
+                detailScraped: true,
+            };
+            if (request.userData.label === 'CONTACT_HOME' && (!merged.email || !merged.telefono)) {
+                const contactUrl = findContactPageUrl($, request.url);
+                if (contactUrl) {
+                    await addRequests([{ url: contactUrl, userData: { label: 'CONTACT_PAGE', company: merged }, uniqueKey: `contact-page::${contactUrl}::${merged.detailUrl}` }]);
+                    return;
+                }
+            }
+            await Dataset.pushData(merged);
+            savedDetails++;
+            return;
+        }
+
         const base = request.userData.company ?? {};
         const detail = parseDetail($, body);
         const merged = { ...base, ...detail, detailScraped: true };
@@ -499,7 +589,7 @@ const detailCrawler = new CheerioCrawler({
 const detailRequests = listingRecords.map(company => ({
     url: company.detailUrl,
     userData: { label: 'DETAIL', company },
-    uniqueKey: `detail::${company.detailUrl}`,
+    uniqueKey: `detail::${company.categoryKey || 'cat'}::${company.detailUrl}`,
 }));
 
 await detailCrawler.run(detailRequests);
