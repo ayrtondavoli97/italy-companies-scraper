@@ -4,7 +4,7 @@ Extract structured Italian company data from aziende.it by business category.
 
 This Actor is built for users who need clean Italian business datasets for market research, B2B research, CRM preparation, territory mapping, competitive intelligence, SEO analysis, supplier discovery, investment scouting, and BI or AI data workflows.
 
-The default mode is fast and lightweight. It collects company listing data such as company name, revenue range, ATECO code, province, city and source detail URL. An optional details mode opens each company page and enriches the dataset with VAT number, address, postal code and employee range when available.
+The default mode is fast and lightweight. It collects company listing data such as company name, revenue range, ATECO code, province, city and source detail URL. An optional details mode opens each company page and enriches the dataset with VAT number, address, postal code and employee range when available. Because the details mode fetches one extra page per company, it takes noticeably more time and platform resources than listing mode — see **Optional full-detail mode** below before enabling it.
 
 ## What you can scrape
 
@@ -70,9 +70,13 @@ Full-detail enrichment can add:
 - Activity status, when available
 - Foundation date, when available
 
-Full-detail mode is slower because each company requires an additional detail-page request.
+Full-detail mode is slower and more resource-intensive than listing mode, because **every company requires its own additional detail-page request**. In practice this means:
 
-Based on current tests, about **100 companies with details are pushed to the dataset in roughly 1 minute**. The exact speed depends on source response time, proxy performance and Apify runtime conditions.
+- **More time:** runs take much longer — plan to raise the run timeout (see below).
+- **More compute:** longer runs consume more Apify compute units (and therefore more platform usage/cost).
+- **More proxy traffic:** one extra request per company increases proxy bandwidth usage.
+
+Based on current tests, about **100 companies with details are pushed to the dataset in roughly 1 minute**. The exact speed depends on source response time, proxy performance and Apify runtime conditions. As a rule of thumb: listing-only is the right choice for large datasets, and details mode is worth its extra cost only when you specifically need VAT number, address, postal code or employee range.
 
 For full-detail runs, increase the Actor timeout in **Run options**:
 
@@ -250,7 +254,7 @@ The dataset table uses English labels for international buyers. Raw field keys a
 
 This Actor should be positioned as an **Italian company registry dataset scraper**, not as an email scraper.
 
-azienda.it rarely exposes real email, PEC, phone or website fields on company detail pages. These fields are included in the output schema because they may appear in some cases, but they are often null.
+aziende.it rarely exposes real email, PEC, phone or website fields on company detail pages. These fields are included in the output schema because they may appear in some cases, but they are often null.
 
 For email, PEC, phone or website discovery at scale, use a separate contact-enrichment workflow after exporting this dataset.
 
