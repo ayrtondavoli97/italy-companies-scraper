@@ -59,8 +59,8 @@
         "detailConcurrency": {
             "title": "Detail speed",
             "type": "integer",
-            "description": "Parallel requests during the company detail phase. Recommended: 10-16. Higher values may increase retries/timeouts depending on the source response time.",
-            "default": 14,
+            "description": "Parallel requests during the company detail phase. Recommended: 14-18. Higher values may increase retries/timeouts depending on the source response time.",
+            "default": 16,
             "minimum": 1,
             "maximum": 64
         },
@@ -75,8 +75,8 @@
         "detailMaxRequestsPerMinute": {
             "title": "Detail requests per minute",
             "type": "integer",
-            "description": "Rate limit for detail pages. Recommended: 130-170. Increase carefully if retries remain low.",
-            "default": 150,
+            "description": "Rate limit for detail pages. Recommended: 150-190. Increase carefully if retries remain low.",
+            "default": 170,
             "minimum": 1,
             "maximum": 1000
         },
