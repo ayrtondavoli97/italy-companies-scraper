@@ -1,10 +1,8 @@
 /**
- * Aziende.it Scraper v10.4
+ * Aziende.it Scraper v10.5
  *
- * Scrapes Italian company listings from aziende.it by simple business category
- * names or direct category URLs. Optional detail scraping enriches each company
- * with fields discovered on the detail page. Fast mode discovers listing pages in
- * parallel and uses configurable concurrency to collect more data faster.
+ * Faster controlled mode: detail pages are processed with backpressure, so the
+ * crawler does not flood the queue with thousands of pending detail requests.
  */
 
 import { Actor } from 'apify';
@@ -24,9 +22,10 @@ const {
     maxItems = 5000,
     maxPagesPerCategory = 200,
     includeDetails = true,
-    includeWebsiteContacts = true,
-    maxConcurrency = includeDetails ? 16 : 24,
-    parallelPageDiscovery = true,
+    includeWebsiteContacts = false,
+    maxConcurrency = includeDetails ? 12 : 24,
+    pageBatchSize = 8,
+    maxPendingDetails = includeDetails ? 220 : 0,
     debug = false,
     proxyConfig: proxyConfigInput,
 } = input;
@@ -86,36 +85,19 @@ const CATEGORY_PRESETS = {
     ],
 };
 
-function normalizeText(value) {
-    return String(value ?? '').replace(/\s+/g, ' ').trim();
-}
-
-function normalizeKey(value) {
-    return normalizeText(value)
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/[^a-z0-9]+/g, ' ')
-        .trim();
-}
-
-function asArray(value) {
-    if (Array.isArray(value)) return value;
-    if (value === undefined || value === null || value === '') return [];
-    return [value];
-}
+const normalizeText = value => String(value ?? '').replace(/\s+/g, ' ').trim();
+const normalizeKey = value => normalizeText(value).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+const asArray = value => Array.isArray(value) ? value : (value === undefined || value === null || value === '' ? [] : [value]);
 
 function resolveCategoryUrls() {
     const directUrls = asArray(startUrls).map(u => (typeof u === 'string' ? u : u?.url)).filter(Boolean);
-    const categoryNames = [...asArray(category), ...asArray(categories)].map(normalizeKey).filter(Boolean);
+    const names = [...asArray(category), ...asArray(categories)].map(normalizeKey).filter(Boolean);
     const resolved = [];
 
-    for (const name of categoryNames.length ? categoryNames : [DEFAULT_CATEGORY]) {
-        if (/^https?:\/\//i.test(name)) {
-            resolved.push(name);
-        } else if (CATEGORY_PRESETS[name]) {
-            resolved.push(...CATEGORY_PRESETS[name]);
-        } else {
+    for (const name of names.length ? names : [DEFAULT_CATEGORY]) {
+        if (/^https?:\/\//i.test(name)) resolved.push(name);
+        else if (CATEGORY_PRESETS[name]) resolved.push(...CATEGORY_PRESETS[name]);
+        else {
             console.warn(`Categoria "${name}" non riconosciuta. Uso fallback informatica. Valori supportati: ${Object.keys(CATEGORY_PRESETS).join(', ')}`);
             resolved.push(DEFAULT_CATEGORY_URL);
         }
@@ -125,24 +107,23 @@ function resolveCategoryUrls() {
 }
 
 const urls = resolveCategoryUrls();
-if (urls.length === 0) {
+if (!urls.length) {
     console.error('Nessuna categoria valida. Inserisci category, categories o startUrls.');
     await Actor.exit(1);
 }
 
 const proxyConfiguration = proxyConfigInput ? await Actor.createProxyConfiguration(proxyConfigInput) : undefined;
-console.log(`Categorie URL: ${urls.length} | maxItems=${maxItems} | maxPagesPerCategory=${maxPagesPerCategory} | includeDetails=${includeDetails} | includeWebsiteContacts=${includeWebsiteContacts} | maxConcurrency=${maxConcurrency} | parallelPageDiscovery=${parallelPageDiscovery}`);
+console.log(`Categorie URL: ${urls.length} | maxItems=${maxItems} | maxPagesPerCategory=${maxPagesPerCategory} | includeDetails=${includeDetails} | includeWebsiteContacts=${includeWebsiteContacts} | maxConcurrency=${maxConcurrency} | pageBatchSize=${pageBatchSize} | maxPendingDetails=${maxPendingDetails}`);
 
 let savedItems = 0;
-let scheduledDetails = 0;
+let pendingDetails = 0;
 const seenListingUrls = new Set();
 const seenDetailUrls = new Set();
 const seenContactUrls = new Set();
-const expandedCategoryUrls = new Set();
+const categoryStates = new Map();
 
-function outputBudgetUsed() {
-    return savedItems + scheduledDetails;
-}
+const totalReserved = () => savedItems + pendingDetails;
+const hasBudget = () => totalReserved() < maxItems;
 
 function withPage(rawUrl, n) {
     const u = new URL(rawUrl);
@@ -153,14 +134,45 @@ function withPage(rawUrl, n) {
 function parseTotalResults(body) {
     const html = typeof body === 'string' ? body : body.toString();
     const match = html.match(/Totale risultati:\s*([\d.]+)/i);
-    if (!match) return null;
-    return Number(match[1].replace(/\./g, '')) || null;
+    return match ? Number(match[1].replace(/\./g, '')) || null : null;
 }
 
-function categoryPageLimit(totalResults) {
+function calculatePageLimit(totalResults) {
     const totalPages = totalResults ? Math.ceil(totalResults / 25) : maxPagesPerCategory;
     const budgetPages = Math.ceil(maxItems / 25) + urls.length;
     return Math.max(1, Math.min(maxPagesPerCategory, totalPages, budgetPages));
+}
+
+async function scheduleMoreCategoryPages(addRequests, log) {
+    if (!hasBudget()) return;
+    if (includeDetails && pendingDetails >= maxPendingDetails) return;
+
+    const states = [...categoryStates.values()].filter(s => !s.done && s.nextPage <= s.pageLimit);
+    if (!states.length) return;
+
+    const requests = [];
+    let slots = Math.max(1, pageBatchSize);
+    while (slots > 0 && states.some(s => !s.done && s.nextPage <= s.pageLimit)) {
+        for (const state of states) {
+            if (slots <= 0) break;
+            if (state.done || state.nextPage > state.pageLimit) {
+                state.done = true;
+                continue;
+            }
+            const p = state.nextPage++;
+            requests.push({
+                url: withPage(state.categoryUrl, p),
+                userData: { label: 'CATEGORY', categoryUrl: state.categoryUrl, pageNum: p },
+                uniqueKey: `${state.categoryUrl}::pag=${p}`,
+            });
+            slots--;
+        }
+    }
+
+    if (requests.length) {
+        await addRequests(requests);
+        log.info(`Scheduled ${requests.length} category pages. saved=${savedItems}, pendingDetails=${pendingDetails}`);
+    }
 }
 
 const NON_COMPANY = /^\/(categorie|ateco|localita|fatturato|elenco|servizi|blog|about|login|p|down_loads|noRegistrazione|img|download)\b/i;
@@ -168,18 +180,12 @@ function isCompanyHref(href) {
     if (!href) return false;
     if (/^https?:\/\//i.test(href) && !href.startsWith(BASE)) return false;
     const path = href.replace(BASE, '');
-    if (!path.startsWith('/')) return false;
-    if (NON_COMPANY.test(path)) return false;
-    return /^\/[a-z0-9][a-z0-9-]+\/?$/i.test(path.split('?')[0]);
+    return path.startsWith('/') && !NON_COMPANY.test(path) && /^\/[a-z0-9][a-z0-9-]+\/?$/i.test(path.split('?')[0]);
 }
 
 function normalizeUrl(href, base = BASE) {
-    if (!href) return '';
-    try {
-        return new URL(href, base).toString();
-    } catch {
-        return '';
-    }
+    try { return href ? new URL(href, base).toString() : ''; }
+    catch { return ''; }
 }
 
 function parseRevenueRange(value) {
@@ -200,7 +206,7 @@ function parseRows($, categoria) {
         const cols = $row.children('div');
         if (cols.length < 5) return;
         const $a = $row.find('a').filter((__, a) => isCompanyHref($(a).attr('href'))).first();
-        if ($a.length === 0) return;
+        if (!$a.length) return;
         const ragioneSociale = normalizeText($a.text());
         if (!ragioneSociale || ragioneSociale.length < 2) return;
         const txt = i => normalizeText($(cols[i]).text());
@@ -226,8 +232,7 @@ function pickByRegex(text, regex, group = 1) {
 
 function collectLabelValues($) {
     const pairs = [];
-    const selectors = 'tr, li, p, div.row, div[class*="row"], div[class*="col"], dt, dd';
-    $(selectors).each((_, el) => {
+    $('tr, li, p, div.row, div[class*="row"], div[class*="col"], dt, dd').each((_, el) => {
         const $el = $(el);
         const text = normalizeText($el.text());
         if (!text || text.length > 500) return;
@@ -273,9 +278,7 @@ function extractEmailsFromText(value) {
     return [...new Set(raw.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [])].filter(isValidEmail);
 }
 
-function cleanEmail(value) {
-    return extractEmailsFromText(value)[0] || null;
-}
+const cleanEmail = value => extractEmailsFromText(value)[0] || null;
 
 function decodeCloudflareEmail(encoded) {
     if (!encoded || !/^[a-f0-9]+$/i.test(encoded) || encoded.length < 4) return null;
@@ -295,9 +298,7 @@ function cleanWebsite(value, baseUrl = '') {
         if (host === 'aziende.it' || host.endsWith('.aziende.it') || host === 'adintend.com' || host.endsWith('.adintend.com')) return null;
         if (['google.com', 'facebook.com', 'linkedin.com', 'instagram.com', 'youtube.com'].some(d => host === d || host.endsWith(`.${d}`))) return null;
         return u.toString();
-    } catch {
-        return null;
-    }
+    } catch { return null; }
 }
 
 function cleanPhone(value, partitaIva = '') {
@@ -323,13 +324,11 @@ function extractCapFromAddress(indirizzo) {
 function parseJsonLd($) {
     const result = {};
     $('script[type="application/ld+json"]').each((_, el) => {
-        const raw = $(el).text();
         try {
-            const parsed = JSON.parse(raw);
+            const parsed = JSON.parse($(el).text());
             const items = Array.isArray(parsed) ? parsed : [parsed];
             for (const item of items) {
                 if (!item || typeof item !== 'object') continue;
-                if (item.name && !result.ragioneSociale) result.ragioneSociale = normalizeText(item.name);
                 if (item.url && !result.sitoWeb) result.sitoWeb = cleanWebsite(item.url);
                 if (item.email && !result.email) result.email = cleanEmail(item.email);
                 if (item.telephone && !result.telefono) result.telefono = cleanPhone(item.telephone);
@@ -341,15 +340,12 @@ function parseJsonLd($) {
                     if (typeof item.address === 'object' && item.address.postalCode && !result.cap) result.cap = normalizeText(item.address.postalCode);
                 }
             }
-        } catch {
-            // Ignore malformed JSON-LD blocks.
-        }
+        } catch {}
     });
     return result;
 }
 
-function extractContactData($, body, pageUrl, partitaIva = '', options = {}) {
-    const { scanTextPhone = false } = options;
+function extractContactData($, body, pageUrl, partitaIva = '', scanTextPhone = false) {
     const text = normalizeText(typeof body === 'string' ? body : body.toString());
     const mailtoEmails = $('a[href^="mailto:"]').map((_, a) => $(a).attr('href')?.replace(/^mailto:/i, '').split('?')[0]).get();
     const cfEmails = $('a.__cf_email__, span.__cf_email__').map((_, el) => decodeCloudflareEmail($(el).attr('data-cfemail'))).get().filter(Boolean);
@@ -358,23 +354,19 @@ function extractContactData($, body, pageUrl, partitaIva = '', options = {}) {
     const email = emails.find(e => e !== pec) || null;
     const telHref = $('a[href^="tel:"]').map((_, a) => $(a).attr('href')?.replace(/^tel:/i, '')).get().map(v => cleanPhone(v, partitaIva)).find(Boolean) || null;
     const telefono = telHref || (scanTextPhone ? cleanPhone(text, partitaIva) : null);
-    const sitoWeb = cleanWebsite(pageUrl);
-    return { email, pec, telefono, sitoWeb };
+    return { email, pec, telefono, sitoWeb: cleanWebsite(pageUrl) };
 }
 
 function findContactPageUrl($, baseUrl) {
     const candidates = $('a[href]').map((_, a) => {
         const label = normalizeKey($(a).text());
-        const href = normalizeText($(a).attr('href'));
-        const url = cleanWebsite(href, baseUrl);
+        const url = cleanWebsite(normalizeText($(a).attr('href')), baseUrl);
         if (!url) return null;
         let score = 0;
         if (/contatti|contatto|contact|contacts|about|chi siamo|azienda|dove siamo/.test(label)) score += 2;
         if (/contatti|contatto|contact|contacts|about|chi-siamo|azienda|dove-siamo/i.test(url)) score += 2;
         return score > 0 ? { url, score } : null;
-    }).get().filter(Boolean);
-
-    candidates.sort((a, b) => b.score - a.score);
+    }).get().filter(Boolean).sort((a, b) => b.score - a.score);
     return candidates[0]?.url || null;
 }
 
@@ -383,15 +375,11 @@ function parseDetail($, body) {
     const pairs = collectLabelValues($);
     const jsonLd = parseJsonLd($);
 
-    const partitaIvaRaw = findLabel(pairs, ['Partita IVA', 'P IVA', 'P.IVA'])
-        || pickByRegex(text, /(?:Partita\s*IVA|P\.?\s*IVA)\s*[:\-]?\s*(\d{11})/i);
+    const partitaIvaRaw = findLabel(pairs, ['Partita IVA', 'P IVA', 'P.IVA']) || pickByRegex(text, /(?:Partita\s*IVA|P\.?\s*IVA)\s*[:\-]?\s*(\d{11})/i);
     const partitaIva = partitaIvaRaw.replace(/\D/g, '').slice(0, 11) || null;
-
-    const codiceFiscaleRaw = findLabel(pairs, ['Codice fiscale', 'C F', 'C.F.'])
-        || pickByRegex(text, /(?:Codice\s*fiscale|C\.?\s*F\.?)\s*[:\-]?\s*([A-Z0-9]{11,16})/i);
-
+    const codiceFiscaleRaw = findLabel(pairs, ['Codice fiscale', 'C F', 'C.F.']) || pickByRegex(text, /(?:Codice\s*fiscale|C\.?\s*F\.?)\s*[:\-]?\s*([A-Z0-9]{11,16})/i);
     const indirizzo = jsonLd.indirizzo || findLabel(pairs, ['Sede legale', 'Indirizzo', 'Sede']) || null;
-    const detailContacts = extractContactData($, body, BASE, partitaIva, { scanTextPhone: false });
+    const detailContacts = extractContactData($, body, BASE, partitaIva, false);
     const labelEmail = cleanEmail(findLabel(pairs, ['Email', 'E-mail']));
     const labelWebsite = cleanWebsite(findLabel(pairs, ['Sito web', 'Website']));
     const websiteHref = $('a[href^="http"]').map((_, a) => $(a).attr('href')).get().map(h => cleanWebsite(h)).find(Boolean) || null;
@@ -399,8 +387,7 @@ function parseDetail($, body) {
     return {
         partitaIva,
         codiceFiscale: codiceFiscaleRaw || null,
-        rea: findLabel(pairs, ['REA', 'Numero REA', 'Repertorio economico amministrativo'])
-            || pickByRegex(text, /(?:\bREA\b|Numero\s*REA)\s*[:\-]?\s*([A-Z]{2}\s*[-/]?\s*\d+|\d{3,})/i) || null,
+        rea: findLabel(pairs, ['REA', 'Numero REA', 'Repertorio economico amministrativo']) || pickByRegex(text, /(?:\bREA\b|Numero\s*REA)\s*[:\-]?\s*([A-Z]{2}\s*[-/]?\s*\d+|\d{3,})/i) || null,
         indirizzo,
         cap: jsonLd.cap || extractCapFromAddress(indirizzo),
         telefono: jsonLd.telefono || detailContacts.telefono || cleanPhone(findLabel(pairs, ['Telefono', 'Tel']), partitaIva),
@@ -428,26 +415,24 @@ const crawler = new CheerioCrawler({
     proxyConfiguration,
     useSessionPool: true,
     maxConcurrency,
-    maxRequestRetries: 2,
+    maxRequestRetries: 3,
     requestHandlerTimeoutSecs: 45,
     additionalMimeTypes: ['text/html'],
-    preNavigationHooks: [
-        async ({ request }) => {
-            request.headers = {
-                ...request.headers,
-                'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/10.4; +https://apify.com/)'
-            };
-        },
-    ],
+    preNavigationHooks: [async ({ request }) => {
+        request.headers = {
+            ...request.headers,
+            'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/10.5; +https://apify.com/)'
+        };
+    }],
 
     async requestHandler({ $, request, body, log, addRequests }) {
         const { label } = request.userData;
 
         if (label === 'CONTACT_HOME' || label === 'CONTACT_PAGE') {
             const base = request.userData.company ?? {};
-            const contacts = extractContactData($, body, request.url, base.partitaIva, { scanTextPhone: true });
+            const contacts = extractContactData($, body, request.url, base.partitaIva, true);
             const merged = {
                 ...base,
                 email: base.email || contacts.email,
@@ -461,17 +446,14 @@ const crawler = new CheerioCrawler({
                 const contactUrl = findContactPageUrl($, request.url);
                 if (contactUrl && !seenContactUrls.has(contactUrl)) {
                     seenContactUrls.add(contactUrl);
-                    await addRequests([{
-                        url: contactUrl,
-                        userData: { label: 'CONTACT_PAGE', company: merged },
-                        uniqueKey: `contact-page::${contactUrl}::${base.detailUrl}`,
-                    }]);
+                    await addRequests([{ url: contactUrl, userData: { label: 'CONTACT_PAGE', company: merged }, uniqueKey: `contact-page::${contactUrl}::${base.detailUrl}` }]);
                     return;
                 }
             }
 
-            scheduledDetails = Math.max(0, scheduledDetails - 1);
+            pendingDetails = Math.max(0, pendingDetails - 1);
             await pushCompany(merged);
+            await scheduleMoreCategoryPages(addRequests, log);
             return;
         }
 
@@ -484,26 +466,22 @@ const crawler = new CheerioCrawler({
                 const websiteUrl = cleanWebsite(merged.sitoWeb);
                 if (websiteUrl && !seenContactUrls.has(`${websiteUrl}::${merged.detailUrl}`)) {
                     seenContactUrls.add(`${websiteUrl}::${merged.detailUrl}`);
-                    await addRequests([{
-                        url: websiteUrl,
-                        userData: { label: 'CONTACT_HOME', company: merged },
-                        uniqueKey: `contact-home::${websiteUrl}::${merged.detailUrl}`,
-                    }]);
+                    await addRequests([{ url: websiteUrl, userData: { label: 'CONTACT_HOME', company: merged }, uniqueKey: `contact-home::${websiteUrl}::${merged.detailUrl}` }]);
                     return;
                 }
             }
 
-            scheduledDetails = Math.max(0, scheduledDetails - 1);
+            pendingDetails = Math.max(0, pendingDetails - 1);
             await pushCompany(merged);
+            await scheduleMoreCategoryPages(addRequests, log);
             return;
         }
 
         const { categoryUrl, pageNum } = request.userData;
 
         if (debug && pageNum === 1) {
-            const html = typeof body === 'string' ? body : body.toString();
             const safe = (categoryUrl.split('/').pop() || 'cat').replace(/[^\w.-]/g, '_');
-            await Actor.setValue(`category_${safe}_p1.html`, html, { contentType: 'text/html; charset=utf-8' });
+            await Actor.setValue(`category_${safe}_p1.html`, typeof body === 'string' ? body : body.toString(), { contentType: 'text/html; charset=utf-8' });
         }
 
         let categoria = '';
@@ -512,29 +490,27 @@ const crawler = new CheerioCrawler({
             if (t && t.length > categoria.length && t.length < 120 && !/aziende con codice/i.test(t)) categoria = t;
         });
 
-        const totalResults = pageNum === 1 ? parseTotalResults(body) : null;
-        if (pageNum === 1) {
-            log.info(`[${categoryUrl}] Totale risultati: ${totalResults ?? '?'}`);
+        if (pageNum === 1 && !categoryStates.has(categoryUrl)) {
+            const totalResults = parseTotalResults(body);
+            const pageLimit = calculatePageLimit(totalResults);
+            categoryStates.set(categoryUrl, { categoryUrl, nextPage: 2, pageLimit, done: pageLimit <= 1 });
+            log.info(`[${categoryUrl}] Totale risultati: ${totalResults ?? '?'} | pageLimit=${pageLimit}`);
         }
 
         const rows = parseRows($, categoria);
-        log.info(`[p${pageNum}] parsed ${rows.length} rows (saved=${savedItems}, pending=${scheduledDetails}) — ${categoryUrl}`);
+        log.info(`[p${pageNum}] parsed ${rows.length} rows (saved=${savedItems}, pendingDetails=${pendingDetails}) — ${categoryUrl}`);
 
         const detailRequests = [];
         for (const row of rows) {
-            if (outputBudgetUsed() >= maxItems) break;
+            if (!hasBudget()) break;
             if (seenListingUrls.has(row.detailUrl)) continue;
             seenListingUrls.add(row.detailUrl);
 
             if (includeDetails) {
                 if (seenDetailUrls.has(row.detailUrl)) continue;
                 seenDetailUrls.add(row.detailUrl);
-                scheduledDetails++;
-                detailRequests.push({
-                    url: row.detailUrl,
-                    userData: { label: 'DETAIL', company: row },
-                    uniqueKey: `detail::${row.detailUrl}`,
-                });
+                pendingDetails++;
+                detailRequests.push({ url: row.detailUrl, userData: { label: 'DETAIL', company: row }, uniqueKey: `detail::${row.detailUrl}` });
             } else {
                 await pushCompany({ ...row, detailScraped: false });
             }
@@ -542,40 +518,19 @@ const crawler = new CheerioCrawler({
 
         if (detailRequests.length) await addRequests(detailRequests);
 
-        if (parallelPageDiscovery && pageNum === 1 && !expandedCategoryUrls.has(categoryUrl)) {
-            expandedCategoryUrls.add(categoryUrl);
-            const limit = categoryPageLimit(totalResults);
-            const pageRequests = [];
-            for (let p = 2; p <= limit; p++) {
-                pageRequests.push({
-                    url: withPage(categoryUrl, p),
-                    userData: { label: 'CATEGORY', categoryUrl, pageNum: p },
-                    uniqueKey: `${categoryUrl}::pag=${p}`,
-                });
-            }
-            if (pageRequests.length) {
-                await addRequests(pageRequests);
-                log.info(`[${categoryUrl}] scheduled ${pageRequests.length} pages in parallel.`);
-            }
-            return;
+        if (rows.length === 0) {
+            const state = categoryStates.get(categoryUrl);
+            if (state) state.done = true;
+            log.info(`[${categoryUrl}] no rows on p${pageNum} — end.`);
         }
 
-        if (outputBudgetUsed() >= maxItems) { log.info('maxItems reached.'); return; }
-        if (rows.length === 0) { log.info(`[${categoryUrl}] no rows on p${pageNum} — end.`); return; }
-        if (pageNum >= maxPagesPerCategory) { log.info(`[${categoryUrl}] maxPagesPerCategory reached.`); return; }
-        if (parallelPageDiscovery && expandedCategoryUrls.has(categoryUrl)) return;
-
-        await addRequests([{
-            url: withPage(categoryUrl, pageNum + 1),
-            userData: { label: 'CATEGORY', categoryUrl, pageNum: pageNum + 1 },
-            uniqueKey: `${categoryUrl}::pag=${pageNum + 1}`,
-        }]);
+        await scheduleMoreCategoryPages(addRequests, log);
     },
 
     async failedRequestHandler({ request, log }) {
         log.error(`Failed: ${request.url}`);
         if ((request.userData?.label === 'DETAIL' || request.userData?.label === 'CONTACT_HOME' || request.userData?.label === 'CONTACT_PAGE') && request.userData?.company) {
-            scheduledDetails = Math.max(0, scheduledDetails - 1);
+            pendingDetails = Math.max(0, pendingDetails - 1);
             await pushCompany({ ...request.userData.company, detailScraped: request.userData?.label !== 'DETAIL', detailError: request.errorMessages?.join(' | ') || 'Request failed' });
         }
     },
