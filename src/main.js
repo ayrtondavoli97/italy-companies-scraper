@@ -1,5 +1,5 @@
 /**
- * Aziende.it Scraper v11.3
+ * Aziende.it Scraper v11.3.1
  *
  * Production mode:
  * - Fast listing by default.
@@ -427,7 +427,7 @@ const listingCrawler = new CheerioCrawler({
             ...request.headers,
             'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/11.3; +https://apify.com/)'
+            'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/11.3.1; +https://apify.com/)'
         };
     }],
 
@@ -507,7 +507,7 @@ const startRequests = categoryTargets.map((t, i) => {
 
 await listingCrawler.run(startRequests);
 const summaryArray = [...categorySummary.values()].map(s => ({ ...s }));
-await Actor.setValue('category-summary.json', summaryArray, { contentType: 'application/json; charset=utf-8' });
+await Actor.setValue('category-summary.json', JSON.stringify(summaryArray, null, 2), { contentType: 'application/json; charset=utf-8' });
 console.log(`Category summary: ${JSON.stringify(summaryArray)}`);
 console.log(`Listing phase done. Collected ${listingRecords.length} companies.`);
 
@@ -532,7 +532,7 @@ const detailCrawler = new CheerioCrawler({
             ...request.headers,
             'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/11.3-detail; +https://apify.com/)'
+            'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/11.3.1-detail; +https://apify.com/)'
         };
     }],
 
