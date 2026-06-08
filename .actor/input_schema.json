@@ -1,32 +1,26 @@
 {
-    "title": "Italy Companies Scraper",
+    "title": "Italian Company Data Scraper",
     "type": "object",
     "schemaVersion": 1,
     "properties": {
         "category": {
             "title": "Business category",
             "type": "string",
-            "description": "Choose a simple Italian business category. Use 'all' only for category validation tests, not for production scraping. Supported examples: informatica, software, consulenza, marketing, alimentare, tessile, edilizia, immobiliare, ristorazione, trasporti, turismo, meccanica.",
+            "description": "Choose the main Italian business category to scrape. Validated categories: informatica, software, consulenza, marketing, edilizia, immobiliare, turismo, trasporti.",
             "editor": "textfield",
             "default": "informatica"
         },
         "categories": {
             "title": "Additional categories",
             "type": "array",
-            "description": "Optional extra categories to merge into the same dataset. Example: software, consulenza. Leave empty for a single-category run.",
+            "description": "Optional extra validated categories to merge into the same dataset. Example: software, consulenza, marketing. Leave empty for a single-category run.",
             "editor": "stringList",
             "default": []
-        },
-        "allCategories": {
-            "title": "Test all preset categories",
-            "type": "boolean",
-            "description": "QA/testing option. When enabled, the Actor runs all preset categories. Combine it with 'Maximum results per category' set to 1 or 2 to validate which presets return data.",
-            "default": false
         },
         "maxItemsPerCategory": {
             "title": "Maximum results per category",
             "type": "integer",
-            "description": "Optional QA/segmentation limit. Set to 1 or 2 when testing all categories. Leave empty or 0 for normal production scraping controlled by Maximum results.",
+            "description": "Optional category-level limit. Use it when scraping multiple categories and you want a balanced dataset, for example 1000 companies per category. Set to 0 to use only the overall Maximum results limit.",
             "default": 0,
             "minimum": 0,
             "maximum": 100000
@@ -49,6 +43,12 @@
             "title": "Try website contact enrichment",
             "type": "boolean",
             "description": "Optional advanced enrichment. If a real company website is found, the Actor can try to inspect it for public emails, PEC and phone numbers. This slows runs down and often returns few results because aziende.it rarely exposes company websites.",
+            "default": false
+        },
+        "allCategories": {
+            "title": "Scrape all validated categories",
+            "type": "boolean",
+            "description": "When enabled, the Actor runs all validated preset categories. Recommended with Maximum results per category to keep the dataset balanced.",
             "default": false
         },
         "startUrls": {
