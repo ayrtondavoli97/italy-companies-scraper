@@ -1,9 +1,12 @@
 /**
- * Aziende.it Scraper v10.6
+ * Aziende.it Scraper v11.0
  *
- * Controlled high-throughput mode. The crawler keeps a small rolling window of
- * category pages and detail pages instead of flooding the queue. This improves
- * throughput while keeping request spikes low.
+ * Two-phase architecture:
+ * 1) Listing phase: collect company rows and detail URLs quickly.
+ * 2) Detail phase: enrich collected URLs in a separate controlled pass.
+ *
+ * This avoids mixing discovery and enrichment, reduces queue bursts, and gives
+ * a more predictable throughput without pushing the source too aggressively.
  */
 
 import { Actor } from 'apify';
@@ -24,15 +27,17 @@ const {
     maxPagesPerCategory = 200,
     includeDetails = true,
     includeWebsiteContacts = false,
-    maxConcurrency = includeDetails ? 12 : 24,
-    pageBatchSize = 4,
-    maxPendingDetails = includeDetails ? 180 : 0,
-    maxCategoryPagesQueued = 18,
-    scheduleCooldownMs = 1500,
-    maxRequestsPerMinute = includeDetails ? 140 : 240,
+    dataDepth: rawDataDepth,
+    listingConcurrency = 24,
+    detailConcurrency = 10,
+    listingMaxRequestsPerMinute = 240,
+    detailMaxRequestsPerMinute = 110,
     debug = false,
     proxyConfig: proxyConfigInput,
 } = input;
+
+const dataDepth = rawDataDepth || (includeDetails ? 'full' : 'listing');
+const shouldScrapeDetails = dataDepth !== 'listing';
 
 const CATEGORY_PRESETS = {
     informatica: [
@@ -102,7 +107,7 @@ function resolveCategoryUrls() {
         if (/^https?:\/\//i.test(name)) resolved.push(name);
         else if (CATEGORY_PRESETS[name]) resolved.push(...CATEGORY_PRESETS[name]);
         else {
-            console.warn(`Categoria "${name}" non riconosciuta. Uso fallback informatica. Valori supportati: ${Object.keys(CATEGORY_PRESETS).join(', ')}`);
+            console.warn(`Category "${name}" is not recognized. Falling back to informatica. Supported values: ${Object.keys(CATEGORY_PRESETS).join(', ')}`);
             resolved.push(DEFAULT_CATEGORY_URL);
         }
     }
@@ -110,26 +115,14 @@ function resolveCategoryUrls() {
     return [...new Set([...directUrls, ...resolved])];
 }
 
-const urls = resolveCategoryUrls();
-if (!urls.length) {
-    console.error('Nessuna categoria valida. Inserisci category, categories o startUrls.');
+const categoryUrls = resolveCategoryUrls();
+if (!categoryUrls.length) {
+    console.error('No valid category URL. Provide category, categories, or startUrls.');
     await Actor.exit(1);
 }
 
 const proxyConfiguration = proxyConfigInput ? await Actor.createProxyConfiguration(proxyConfigInput) : undefined;
-console.log(`Categorie URL: ${urls.length} | maxItems=${maxItems} | maxPagesPerCategory=${maxPagesPerCategory} | includeDetails=${includeDetails} | includeWebsiteContacts=${includeWebsiteContacts} | maxConcurrency=${maxConcurrency} | pageBatchSize=${pageBatchSize} | maxPendingDetails=${maxPendingDetails} | maxCategoryPagesQueued=${maxCategoryPagesQueued} | maxRequestsPerMinute=${maxRequestsPerMinute}`);
-
-let savedItems = 0;
-let pendingDetails = 0;
-let queuedCategoryPages = 0;
-let lastScheduleAt = 0;
-const seenListingUrls = new Set();
-const seenDetailUrls = new Set();
-const seenContactUrls = new Set();
-const categoryStates = new Map();
-
-const totalReserved = () => savedItems + pendingDetails;
-const hasBudget = () => totalReserved() < maxItems;
+console.log(`Mode=${dataDepth} | categoryUrls=${categoryUrls.length} | maxItems=${maxItems} | maxPagesPerCategory=${maxPagesPerCategory} | listingConcurrency=${listingConcurrency} | detailConcurrency=${detailConcurrency} | listingRPM=${listingMaxRequestsPerMinute} | detailRPM=${detailMaxRequestsPerMinute} | includeWebsiteContacts=${includeWebsiteContacts}`);
 
 function withPage(rawUrl, n) {
     const u = new URL(rawUrl);
@@ -145,47 +138,12 @@ function parseTotalResults(body) {
 
 function calculatePageLimit(totalResults) {
     const totalPages = totalResults ? Math.ceil(totalResults / 25) : maxPagesPerCategory;
-    const budgetPages = Math.ceil(maxItems / 25) + urls.length;
-    return Math.max(1, Math.min(maxPagesPerCategory, totalPages, budgetPages));
+    return Math.max(1, Math.min(maxPagesPerCategory, totalPages));
 }
 
-async function scheduleMoreCategoryPages(addRequests, log, force = false) {
-    if (!hasBudget()) return;
-    if (includeDetails && pendingDetails >= maxPendingDetails) return;
-    if (queuedCategoryPages >= maxCategoryPagesQueued) return;
-
-    const now = Date.now();
-    if (!force && now - lastScheduleAt < scheduleCooldownMs) return;
-
-    const states = [...categoryStates.values()].filter(s => !s.done && s.nextPage <= s.pageLimit);
-    if (!states.length) return;
-
-    const requests = [];
-    let slots = Math.min(Math.max(1, pageBatchSize), Math.max(0, maxCategoryPagesQueued - queuedCategoryPages));
-
-    while (slots > 0 && states.some(s => !s.done && s.nextPage <= s.pageLimit)) {
-        for (const state of states) {
-            if (slots <= 0) break;
-            if (state.done || state.nextPage > state.pageLimit) {
-                state.done = true;
-                continue;
-            }
-            const p = state.nextPage++;
-            requests.push({
-                url: withPage(state.categoryUrl, p),
-                userData: { label: 'CATEGORY', categoryUrl: state.categoryUrl, pageNum: p },
-                uniqueKey: `${state.categoryUrl}::pag=${p}`,
-            });
-            slots--;
-        }
-    }
-
-    if (requests.length) {
-        queuedCategoryPages += requests.length;
-        lastScheduleAt = now;
-        await addRequests(requests);
-        log.info(`Scheduled ${requests.length} category pages. saved=${savedItems}, pendingDetails=${pendingDetails}, queuedCategoryPages=${queuedCategoryPages}`);
-    }
+function normalizeUrl(href, base = BASE) {
+    try { return href ? new URL(href, base).toString() : ''; }
+    catch { return ''; }
 }
 
 const NON_COMPANY = /^\/(categorie|ateco|localita|fatturato|elenco|servizi|blog|about|login|p|down_loads|noRegistrazione|img|download)\b/i;
@@ -194,11 +152,6 @@ function isCompanyHref(href) {
     if (/^https?:\/\//i.test(href) && !href.startsWith(BASE)) return false;
     const path = href.replace(BASE, '');
     return path.startsWith('/') && !NON_COMPANY.test(path) && /^\/[a-z0-9][a-z0-9-]+\/?$/i.test(path.split('?')[0]);
-}
-
-function normalizeUrl(href, base = BASE) {
-    try { return href ? new URL(href, base).toString() : ''; }
-    catch { return ''; }
 }
 
 function parseRevenueRange(value) {
@@ -418,85 +371,35 @@ function needsWebsiteContactPass(company) {
     return includeWebsiteContacts && company.sitoWeb && (!company.email || !company.telefono || !company.pec);
 }
 
-async function pushCompany(record) {
-    if (savedItems >= maxItems) return;
-    await Dataset.pushData(record);
-    savedItems++;
-}
+const listingRecords = [];
+const seenDetailUrls = new Set();
+let listingPagesFinished = 0;
 
-const crawler = new CheerioCrawler({
+const listingCrawler = new CheerioCrawler({
     proxyConfiguration,
     useSessionPool: true,
-    maxConcurrency,
-    maxRequestsPerMinute,
+    maxConcurrency: listingConcurrency,
+    maxRequestsPerMinute: listingMaxRequestsPerMinute,
     maxRequestRetries: 3,
-    requestHandlerTimeoutSecs: 75,
+    navigationTimeoutSecs: 60,
+    requestHandlerTimeoutSecs: 90,
     additionalMimeTypes: ['text/html'],
     preNavigationHooks: [async ({ request }) => {
         request.headers = {
             ...request.headers,
             'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/10.6; +https://apify.com/)'
+            'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/11.0; +https://apify.com/)'
         };
     }],
 
     async requestHandler({ $, request, body, log, addRequests }) {
-        const { label } = request.userData;
-
-        if (label === 'CONTACT_HOME' || label === 'CONTACT_PAGE') {
-            const base = request.userData.company ?? {};
-            const contacts = extractContactData($, body, request.url, base.partitaIva, true);
-            const merged = {
-                ...base,
-                email: base.email || contacts.email,
-                pec: base.pec || contacts.pec,
-                telefono: base.telefono || contacts.telefono,
-                sitoWeb: base.sitoWeb || contacts.sitoWeb,
-                websiteContactScraped: true,
-            };
-
-            if (label === 'CONTACT_HOME' && (!merged.email || !merged.telefono)) {
-                const contactUrl = findContactPageUrl($, request.url);
-                if (contactUrl && !seenContactUrls.has(contactUrl)) {
-                    seenContactUrls.add(contactUrl);
-                    await addRequests([{ url: contactUrl, userData: { label: 'CONTACT_PAGE', company: merged }, uniqueKey: `contact-page::${contactUrl}::${base.detailUrl}` }]);
-                    return;
-                }
-            }
-
-            pendingDetails = Math.max(0, pendingDetails - 1);
-            await pushCompany(merged);
-            await scheduleMoreCategoryPages(addRequests, log);
-            return;
-        }
-
-        if (label === 'DETAIL') {
-            const base = request.userData.company ?? {};
-            const detail = parseDetail($, body);
-            const merged = { ...base, ...detail, detailScraped: true };
-
-            if (needsWebsiteContactPass(merged)) {
-                const websiteUrl = cleanWebsite(merged.sitoWeb);
-                if (websiteUrl && !seenContactUrls.has(`${websiteUrl}::${merged.detailUrl}`)) {
-                    seenContactUrls.add(`${websiteUrl}::${merged.detailUrl}`);
-                    await addRequests([{ url: websiteUrl, userData: { label: 'CONTACT_HOME', company: merged }, uniqueKey: `contact-home::${websiteUrl}::${merged.detailUrl}` }]);
-                    return;
-                }
-            }
-
-            pendingDetails = Math.max(0, pendingDetails - 1);
-            await pushCompany(merged);
-            await scheduleMoreCategoryPages(addRequests, log);
-            return;
-        }
-
         const { categoryUrl, pageNum } = request.userData;
-        if (pageNum > 1) queuedCategoryPages = Math.max(0, queuedCategoryPages - 1);
+        listingPagesFinished++;
 
         if (debug && pageNum === 1) {
             const safe = (categoryUrl.split('/').pop() || 'cat').replace(/[^\w.-]/g, '_');
-            await Actor.setValue(`category_${safe}_p1.html`, typeof body === 'string' ? body : body.toString(), { contentType: 'text/html; charset=utf-8' });
+            await Actor.setValue(`listing_${safe}_p1.html`, typeof body === 'string' ? body : body.toString(), { contentType: 'text/html; charset=utf-8' });
         }
 
         let categoria = '';
@@ -505,59 +408,99 @@ const crawler = new CheerioCrawler({
             if (t && t.length > categoria.length && t.length < 120 && !/aziende con codice/i.test(t)) categoria = t;
         });
 
-        if (pageNum === 1 && !categoryStates.has(categoryUrl)) {
+        if (pageNum === 1) {
             const totalResults = parseTotalResults(body);
             const pageLimit = calculatePageLimit(totalResults);
-            categoryStates.set(categoryUrl, { categoryUrl, nextPage: 2, pageLimit, done: pageLimit <= 1 });
-            log.info(`[${categoryUrl}] Totale risultati: ${totalResults ?? '?'} | pageLimit=${pageLimit}`);
+            const pageRequests = [];
+            for (let p = 2; p <= pageLimit; p++) {
+                pageRequests.push({
+                    url: withPage(categoryUrl, p),
+                    userData: { label: 'LISTING', categoryUrl, pageNum: p },
+                    uniqueKey: `${categoryUrl}::pag=${p}`,
+                });
+            }
+            if (pageRequests.length) await addRequests(pageRequests);
+            log.info(`[listing] ${categoryUrl} total=${totalResults ?? '?'} pageLimit=${pageLimit} scheduledPages=${pageRequests.length}`);
         }
 
         const rows = parseRows($, categoria);
-        log.info(`[p${pageNum}] parsed ${rows.length} rows (saved=${savedItems}, pendingDetails=${pendingDetails}, queuedCategoryPages=${queuedCategoryPages}) — ${categoryUrl}`);
-
-        const detailRequests = [];
         for (const row of rows) {
-            if (!hasBudget()) break;
-            if (seenListingUrls.has(row.detailUrl)) continue;
-            seenListingUrls.add(row.detailUrl);
-
-            if (includeDetails) {
-                if (seenDetailUrls.has(row.detailUrl)) continue;
-                seenDetailUrls.add(row.detailUrl);
-                pendingDetails++;
-                detailRequests.push({ url: row.detailUrl, userData: { label: 'DETAIL', company: row }, uniqueKey: `detail::${row.detailUrl}` });
-            } else {
-                await pushCompany({ ...row, detailScraped: false });
-            }
+            if (listingRecords.length >= maxItems) break;
+            if (!row.detailUrl || seenDetailUrls.has(row.detailUrl)) continue;
+            seenDetailUrls.add(row.detailUrl);
+            listingRecords.push(row);
         }
 
-        if (detailRequests.length) await addRequests(detailRequests);
-
-        if (rows.length === 0) {
-            const state = categoryStates.get(categoryUrl);
-            if (state) state.done = true;
-            log.info(`[${categoryUrl}] no rows on p${pageNum} — end.`);
-        }
-
-        await scheduleMoreCategoryPages(addRequests, log, pageNum === 1);
-    },
-
-    async failedRequestHandler({ request, log }) {
-        log.error(`Failed: ${request.url}`);
-        if (request.userData?.label === 'CATEGORY' && request.userData?.pageNum > 1) queuedCategoryPages = Math.max(0, queuedCategoryPages - 1);
-        if ((request.userData?.label === 'DETAIL' || request.userData?.label === 'CONTACT_HOME' || request.userData?.label === 'CONTACT_PAGE') && request.userData?.company) {
-            pendingDetails = Math.max(0, pendingDetails - 1);
-            await pushCompany({ ...request.userData.company, detailScraped: request.userData?.label !== 'DETAIL', detailError: request.errorMessages?.join(' | ') || 'Request failed' });
-        }
+        log.info(`[listing p${pageNum}] rows=${rows.length} collected=${listingRecords.length}/${maxItems} pagesFinished=${listingPagesFinished} — ${categoryUrl}`);
     },
 });
 
-const startRequests = urls.map(u => ({
+const startRequests = categoryUrls.map(u => ({
     url: withPage(u, 1),
-    userData: { label: 'CATEGORY', categoryUrl: u, pageNum: 1 },
+    userData: { label: 'LISTING', categoryUrl: u, pageNum: 1 },
     uniqueKey: `${u}::pag=1`,
 }));
 
-await crawler.run(startRequests);
-console.log(`Done. Total saved: ${savedItems} companies.`);
+await listingCrawler.run(startRequests);
+console.log(`Listing phase done. Collected ${listingRecords.length} companies.`);
+
+if (!shouldScrapeDetails) {
+    await Dataset.pushData(listingRecords.map(r => ({ ...r, detailScraped: false })));
+    console.log(`Done. Saved ${listingRecords.length} listing-only companies.`);
+    await Actor.exit();
+}
+
+let savedDetails = 0;
+const detailCrawler = new CheerioCrawler({
+    proxyConfiguration,
+    useSessionPool: true,
+    maxConcurrency: detailConcurrency,
+    maxRequestsPerMinute: detailMaxRequestsPerMinute,
+    maxRequestRetries: 3,
+    navigationTimeoutSecs: 75,
+    requestHandlerTimeoutSecs: 120,
+    additionalMimeTypes: ['text/html'],
+    preNavigationHooks: [async ({ request }) => {
+        request.headers = {
+            ...request.headers,
+            'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/11.0-detail; +https://apify.com/)'
+        };
+    }],
+
+    async requestHandler({ $, request, body, addRequests, log }) {
+        const base = request.userData.company ?? {};
+        const detail = parseDetail($, body);
+        const merged = { ...base, ...detail, detailScraped: true };
+
+        if (needsWebsiteContactPass(merged)) {
+            const websiteUrl = cleanWebsite(merged.sitoWeb);
+            if (websiteUrl) {
+                await addRequests([{ url: websiteUrl, userData: { label: 'CONTACT_HOME', company: merged }, uniqueKey: `contact-home::${websiteUrl}::${merged.detailUrl}` }]);
+                return;
+            }
+        }
+
+        await Dataset.pushData(merged);
+        savedDetails++;
+        if (savedDetails % 100 === 0) log.info(`[detail] saved=${savedDetails}/${listingRecords.length}`);
+    },
+
+    async failedRequestHandler({ request, log }) {
+        const base = request.userData?.company ?? {};
+        log.warning(`[detail failed] ${request.url}`);
+        await Dataset.pushData({ ...base, detailScraped: false, detailError: request.errorMessages?.join(' | ') || 'Request failed' });
+        savedDetails++;
+    },
+});
+
+const detailRequests = listingRecords.map(company => ({
+    url: company.detailUrl,
+    userData: { label: 'DETAIL', company },
+    uniqueKey: `detail::${company.detailUrl}`,
+}));
+
+await detailCrawler.run(detailRequests);
+console.log(`Done. Saved ${savedDetails} enriched companies.`);
 await Actor.exit();
