@@ -1,14 +1,14 @@
 {
     "actorSpecification": 1,
-    "name": "aziende-it-scraper",
-    "title": "Italy Companies Scraper — companies by simple category",
-    "description": "Scrape Italian company listings from aziende.it using simple category names such as informatica, alimentare, tessile, edilizia and more. Optionally enriches results from company detail pages with VAT, tax code, REA, address, PEC, email, phone, website and other public fields when available.",
-    "version": "10.3",
+    "name": "italy-companies-scraper",
+    "title": "Italy Companies Scraper — business registry data by category",
+    "description": "Scrape Italian company listings from aziende.it using simple business categories. Supports a fast listing mode and a full details mode that enriches records with VAT number, address, postal code, employees, revenue range, ATECO code and other public fields when available.",
+    "version": "11.1",
     "buildTag": "latest",
     "dockerfile": "./Dockerfile",
     "input": "./input_schema.json",
     "defaultRunOptions": {
-        "timeoutSecs": 7200,
+        "timeoutSecs": 900,
         "memoryMbytes": 1024
     },
     "storages": {
@@ -39,32 +39,34 @@
                             "statoAttivita",
                             "dipendenti",
                             "categoria",
-                            "detailUrl"
+                            "detailUrl",
+                            "detailScraped"
                         ]
                     },
                     "display": {
                         "component": "table",
                         "properties": {
-                            "ragioneSociale": { "label": "Ragione Sociale", "format": "text" },
-                            "partitaIva": { "label": "Partita IVA", "format": "text" },
-                            "codiceFiscale": { "label": "Codice Fiscale", "format": "text" },
-                            "ateco": { "label": "ATECO", "format": "text" },
-                            "fatturato": { "label": "Fatturato", "format": "text" },
-                            "fatturatoMinEur": { "label": "Fatturato min EUR", "format": "number" },
-                            "fatturatoMaxEur": { "label": "Fatturato max EUR", "format": "number" },
-                            "provincia": { "label": "Provincia", "format": "text" },
-                            "citta": { "label": "Città", "format": "text" },
-                            "indirizzo": { "label": "Indirizzo", "format": "text" },
-                            "cap": { "label": "CAP", "format": "text" },
-                            "telefono": { "label": "Telefono", "format": "text" },
+                            "ragioneSociale": { "label": "Company name", "format": "text" },
+                            "partitaIva": { "label": "VAT number", "format": "text" },
+                            "codiceFiscale": { "label": "Tax code", "format": "text" },
+                            "ateco": { "label": "ATECO code", "format": "text" },
+                            "fatturato": { "label": "Revenue range", "format": "text" },
+                            "fatturatoMinEur": { "label": "Revenue min EUR", "format": "number" },
+                            "fatturatoMaxEur": { "label": "Revenue max EUR", "format": "number" },
+                            "provincia": { "label": "Province", "format": "text" },
+                            "citta": { "label": "City", "format": "text" },
+                            "indirizzo": { "label": "Address", "format": "text" },
+                            "cap": { "label": "Postal code", "format": "text" },
+                            "telefono": { "label": "Phone", "format": "text" },
                             "email": { "label": "Email", "format": "text" },
                             "pec": { "label": "PEC", "format": "text" },
-                            "sitoWeb": { "label": "Sito web", "format": "link" },
-                            "formaGiuridica": { "label": "Forma giuridica", "format": "text" },
-                            "statoAttivita": { "label": "Stato attività", "format": "text" },
-                            "dipendenti": { "label": "Dipendenti", "format": "text" },
-                            "categoria": { "label": "Categoria", "format": "text" },
-                            "detailUrl": { "label": "Scheda", "format": "link" }
+                            "sitoWeb": { "label": "Website", "format": "link" },
+                            "formaGiuridica": { "label": "Legal form", "format": "text" },
+                            "statoAttivita": { "label": "Activity status", "format": "text" },
+                            "dipendenti": { "label": "Employees", "format": "text" },
+                            "categoria": { "label": "Category", "format": "text" },
+                            "detailUrl": { "label": "Source detail page", "format": "link" },
+                            "detailScraped": { "label": "Detail scraped", "format": "boolean" }
                         }
                     }
                 }
