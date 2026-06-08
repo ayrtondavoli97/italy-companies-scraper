@@ -1,0 +1,143 @@
+{
+    "actorSpecification": 1,
+    "title": "Italian Companies Dataset",
+    "description": "Structured Italian company data extracted from aziende.it. Listing mode returns company name, revenue range, ATECO code and location. Optional details mode adds VAT number, address, postal code and employee range when available.",
+    "type": "object",
+    "properties": {
+        "dataset": {
+            "type": "array",
+            "title": "Companies",
+            "description": "Dataset containing extracted Italian company records.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "ragioneSociale": {
+                        "type": "string",
+                        "title": "Company name",
+                        "description": "Legal or commercial company name."
+                    },
+                    "categoryKey": {
+                        "type": "string",
+                        "title": "Requested category",
+                        "description": "Validated category requested by the user or matched through presets."
+                    },
+                    "fatturato": {
+                        "type": "string",
+                        "title": "Revenue range",
+                        "description": "Revenue range as shown by the source."
+                    },
+                    "fatturatoMinEur": {
+                        "type": ["integer", "null"],
+                        "title": "Revenue min EUR",
+                        "description": "Parsed lower bound of the revenue range in EUR."
+                    },
+                    "fatturatoMaxEur": {
+                        "type": ["integer", "null"],
+                        "title": "Revenue max EUR",
+                        "description": "Parsed upper bound of the revenue range in EUR."
+                    },
+                    "ateco": {
+                        "type": "string",
+                        "title": "ATECO code",
+                        "description": "Italian business activity code."
+                    },
+                    "provincia": {
+                        "type": "string",
+                        "title": "Province",
+                        "description": "Italian province where the company is listed."
+                    },
+                    "citta": {
+                        "type": "string",
+                        "title": "City",
+                        "description": "City where the company is listed."
+                    },
+                    "categoria": {
+                        "type": "string",
+                        "title": "Source category label",
+                        "description": "Category label displayed by aziende.it."
+                    },
+                    "detailUrl": {
+                        "type": "string",
+                        "title": "Company detail page",
+                        "description": "Source detail page URL for the company."
+                    },
+                    "partitaIva": {
+                        "type": ["string", "null"],
+                        "title": "VAT number",
+                        "description": "Italian VAT number, available when detail enrichment is enabled and the source exposes it."
+                    },
+                    "indirizzo": {
+                        "type": ["string", "null"],
+                        "title": "Address",
+                        "description": "Company address, available when detail enrichment is enabled and the source exposes it."
+                    },
+                    "cap": {
+                        "type": ["string", "null"],
+                        "title": "Postal code",
+                        "description": "Italian postal code, available when detail enrichment is enabled and the source exposes it."
+                    },
+                    "dipendenti": {
+                        "type": ["string", "null"],
+                        "title": "Employees",
+                        "description": "Employee range, available when detail enrichment is enabled and the source exposes it."
+                    },
+                    "codiceFiscale": {
+                        "type": ["string", "null"],
+                        "title": "Tax code",
+                        "description": "Italian tax code, when available."
+                    },
+                    "rea": {
+                        "type": ["string", "null"],
+                        "title": "REA",
+                        "description": "REA registry number, when available."
+                    },
+                    "telefono": {
+                        "type": ["string", "null"],
+                        "title": "Phone",
+                        "description": "Phone number, rarely available from the source."
+                    },
+                    "email": {
+                        "type": ["string", "null"],
+                        "title": "Email",
+                        "description": "Email address, rarely available from the source."
+                    },
+                    "pec": {
+                        "type": ["string", "null"],
+                        "title": "PEC",
+                        "description": "Certified email address, rarely available from the source."
+                    },
+                    "sitoWeb": {
+                        "type": ["string", "null"],
+                        "title": "Website",
+                        "description": "Company website, rarely available from the source."
+                    },
+                    "formaGiuridica": {
+                        "type": ["string", "null"],
+                        "title": "Legal form",
+                        "description": "Legal form, when available."
+                    },
+                    "statoAttivita": {
+                        "type": ["string", "null"],
+                        "title": "Activity status",
+                        "description": "Company activity status, when available."
+                    },
+                    "dataCostituzione": {
+                        "type": ["string", "null"],
+                        "title": "Foundation date",
+                        "description": "Foundation or incorporation date, when available."
+                    },
+                    "sourceCategoryUrl": {
+                        "type": "string",
+                        "title": "Source category URL",
+                        "description": "azienda.it category URL used as source."
+                    },
+                    "detailScraped": {
+                        "type": "boolean",
+                        "title": "Details included",
+                        "description": "True if detail enrichment was performed for this record."
+                    }
+                }
+            }
+        }
+    }
+}
