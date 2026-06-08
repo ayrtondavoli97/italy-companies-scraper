@@ -1,9 +1,11 @@
 /**
- * Aziende.it Scraper v10.1
+ * Aziende.it Scraper v10.2
  *
  * Scrapes Italian company listings from aziende.it by simple business category
  * names or direct category URLs. Optional detail scraping enriches each company
- * with fields discovered on the detail page.
+ * with fields discovered on the detail page. If a real external website is found,
+ * the actor can also inspect the homepage/contact page to recover public email,
+ * phone and website data where available.
  */
 
 import { Actor } from 'apify';
@@ -23,6 +25,7 @@ const {
     maxItems = 5000,
     maxPagesPerCategory = 200,
     includeDetails = true,
+    includeWebsiteContacts = true,
     debug = false,
     proxyConfig: proxyConfigInput,
 } = input;
@@ -127,12 +130,13 @@ if (urls.length === 0) {
 }
 
 const proxyConfiguration = proxyConfigInput ? await Actor.createProxyConfiguration(proxyConfigInput) : undefined;
-console.log(`Categorie URL: ${urls.length} | maxItems=${maxItems} | maxPagesPerCategory=${maxPagesPerCategory} | includeDetails=${includeDetails}`);
+console.log(`Categorie URL: ${urls.length} | maxItems=${maxItems} | maxPagesPerCategory=${maxPagesPerCategory} | includeDetails=${includeDetails} | includeWebsiteContacts=${includeWebsiteContacts}`);
 
 let savedItems = 0;
 let scheduledDetails = 0;
 const seenListingUrls = new Set();
 const seenDetailUrls = new Set();
+const seenContactUrls = new Set();
 
 function outputBudgetUsed() {
     return savedItems + scheduledDetails;
@@ -154,9 +158,13 @@ function isCompanyHref(href) {
     return /^\/[a-z0-9][a-z0-9-]+\/?$/i.test(path.split('?')[0]);
 }
 
-function normalizeUrl(href) {
+function normalizeUrl(href, base = BASE) {
     if (!href) return '';
-    return href.startsWith('http') ? href : `${BASE}${href}`;
+    try {
+        return new URL(href, base).toString();
+    } catch {
+        return '';
+    }
 }
 
 function parseRevenueRange(value) {
@@ -236,23 +244,41 @@ function isValidEmail(email) {
     if (!email) return false;
     const e = normalizeText(email).toLowerCase();
     if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(e)) return false;
-    return !/(^|@|\.)aziende\.it$|(^|@|\.)adintend\.com$/i.test(e);
+    if (/(^|@|\.)aziende\.it$|(^|@|\.)adintend\.com$/i.test(e)) return false;
+    if (/^(privacy|cookie|noreply|no-reply|newsletter|abuse|postmaster)@/i.test(e)) return false;
+    return true;
+}
+
+function extractEmailsFromText(value) {
+    const raw = normalizeText(value)
+        .replace(/\s*\[at\]\s*|\s*\(at\)\s*|\s+at\s+/gi, '@')
+        .replace(/\s*\[dot\]\s*|\s*\(dot\)\s*|\s+dot\s+/gi, '.')
+        .replace(/\s*@\s*/g, '@')
+        .replace(/\s*\.\s*/g, '.');
+    return [...new Set(raw.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [])].filter(isValidEmail);
 }
 
 function cleanEmail(value) {
-    const match = normalizeText(value).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-    const email = match?.[0] || '';
-    return isValidEmail(email) ? email : null;
+    return extractEmailsFromText(value)[0] || null;
 }
 
-function cleanWebsite(value) {
+function decodeCloudflareEmail(encoded) {
+    if (!encoded || !/^[a-f0-9]+$/i.test(encoded) || encoded.length < 4) return null;
+    const key = parseInt(encoded.slice(0, 2), 16);
+    let out = '';
+    for (let i = 2; i < encoded.length; i += 2) out += String.fromCharCode(parseInt(encoded.slice(i, i + 2), 16) ^ key);
+    return isValidEmail(out) ? out : null;
+}
+
+function cleanWebsite(value, baseUrl = '') {
     const raw = normalizeText(value);
-    if (!raw) return null;
+    if (!raw || raw.startsWith('mailto:') || raw.startsWith('tel:')) return null;
     try {
-        const u = new URL(raw.startsWith('http') ? raw : `https://${raw}`);
+        const u = new URL(raw, baseUrl || undefined);
+        if (!/^https?:$/i.test(u.protocol)) return null;
         const host = u.hostname.replace(/^www\./i, '').toLowerCase();
         if (host === 'aziende.it' || host.endsWith('.aziende.it') || host === 'adintend.com' || host.endsWith('.adintend.com')) return null;
-        if (['google.com', 'facebook.com', 'linkedin.com', 'instagram.com'].some(d => host === d || host.endsWith(`.${d}`))) return null;
+        if (['google.com', 'facebook.com', 'linkedin.com', 'instagram.com', 'youtube.com'].some(d => host === d || host.endsWith(`.${d}`))) return null;
         return u.toString();
     } catch {
         return null;
@@ -294,6 +320,7 @@ function parseJsonLd($) {
                         ? item.address
                         : [item.address.streetAddress, item.address.postalCode, item.address.addressLocality, item.address.addressRegion].filter(Boolean).join(', ');
                     if (address && !result.indirizzo) result.indirizzo = normalizeText(address);
+                    if (typeof item.address === 'object' && item.address.postalCode && !result.cap) result.cap = normalizeText(item.address.postalCode);
                 }
             }
         } catch {
@@ -301,6 +328,35 @@ function parseJsonLd($) {
         }
     });
     return result;
+}
+
+function extractContactData($, body, pageUrl, partitaIva = '') {
+    const text = normalizeText(typeof body === 'string' ? body : body.toString());
+    const mailtoEmails = $('a[href^="mailto:"]').map((_, a) => $(a).attr('href')?.replace(/^mailto:/i, '').split('?')[0]).get();
+    const cfEmails = $('a.__cf_email__, span.__cf_email__').map((_, el) => decodeCloudflareEmail($(el).attr('data-cfemail'))).get().filter(Boolean);
+    const emails = [...new Set([...mailtoEmails, ...cfEmails, ...extractEmailsFromText(text)])].filter(isValidEmail);
+    const pec = emails.find(e => /pec|legalmail|postacert|cert/i.test(e)) || null;
+    const email = emails.find(e => e !== pec) || null;
+    const telHref = $('a[href^="tel:"]').map((_, a) => $(a).attr('href')?.replace(/^tel:/i, '')).get().map(v => cleanPhone(v, partitaIva)).find(Boolean) || null;
+    const telefono = telHref || cleanPhone(text, partitaIva);
+    const sitoWeb = cleanWebsite(pageUrl);
+    return { email, pec, telefono, sitoWeb };
+}
+
+function findContactPageUrl($, baseUrl) {
+    const candidates = $('a[href]').map((_, a) => {
+        const label = normalizeKey($(a).text());
+        const href = normalizeText($(a).attr('href'));
+        const url = cleanWebsite(href, baseUrl);
+        if (!url) return null;
+        let score = 0;
+        if (/contatti|contatto|contact|contacts|about|chi siamo|azienda|dove siamo/.test(label)) score += 2;
+        if (/contatti|contatto|contact|contacts|about|chi-siamo|azienda|dove-siamo/i.test(url)) score += 2;
+        return score > 0 ? { url, score } : null;
+    }).get().filter(Boolean);
+
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0]?.url || null;
 }
 
 function parseDetail($, body) {
@@ -316,13 +372,10 @@ function parseDetail($, body) {
         || pickByRegex(text, /(?:Codice\s*fiscale|C\.?\s*F\.?)\s*[:\-]?\s*([A-Z0-9]{11,16})/i);
 
     const indirizzo = jsonLd.indirizzo || findLabel(pairs, ['Sede legale', 'Indirizzo', 'Sede']) || null;
-    const emails = [...new Set(text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [])].filter(isValidEmail);
-    const pec = emails.find(e => /pec|legalmail|postacert|cert/i.test(e)) || null;
-    const email = jsonLd.email || cleanEmail(findLabel(pairs, ['Email', 'E-mail'])) || emails.find(e => e !== pec) || null;
-
-    const websiteHref = $('a[href^="http"]').map((_, a) => $(a).attr('href')).get().map(cleanWebsite).find(Boolean) || null;
-    const sitoWeb = jsonLd.sitoWeb || cleanWebsite(findLabel(pairs, ['Sito web', 'Website'])) || websiteHref;
-    const telefono = cleanPhone(jsonLd.telefono || findLabel(pairs, ['Telefono', 'Tel']) || pickByRegex(text, /(?:Telefono|Tel\.?)\s*[:\-]?\s*([+]?\d[\d\s()./-]{5,})/i), partitaIva);
+    const detailContacts = extractContactData($, body, BASE, partitaIva);
+    const labelEmail = cleanEmail(findLabel(pairs, ['Email', 'E-mail']));
+    const labelWebsite = cleanWebsite(findLabel(pairs, ['Sito web', 'Website']));
+    const websiteHref = $('a[href^="http"]').map((_, a) => $(a).attr('href')).get().map(h => cleanWebsite(h)).find(Boolean) || null;
 
     return {
         partitaIva,
@@ -330,16 +383,20 @@ function parseDetail($, body) {
         rea: findLabel(pairs, ['REA', 'Numero REA', 'Repertorio economico amministrativo'])
             || pickByRegex(text, /(?:\bREA\b|Numero\s*REA)\s*[:\-]?\s*([A-Z]{2}\s*[-/]?\s*\d+|\d{3,})/i) || null,
         indirizzo,
-        cap: extractCapFromAddress(indirizzo),
-        telefono,
-        email,
-        pec,
-        sitoWeb,
+        cap: jsonLd.cap || extractCapFromAddress(indirizzo),
+        telefono: jsonLd.telefono || detailContacts.telefono || cleanPhone(findLabel(pairs, ['Telefono', 'Tel']), partitaIva),
+        email: jsonLd.email || labelEmail || detailContacts.email,
+        pec: detailContacts.pec,
+        sitoWeb: jsonLd.sitoWeb || labelWebsite || websiteHref,
         formaGiuridica: findLabel(pairs, ['Forma giuridica', 'Natura giuridica']) || null,
         statoAttivita: findLabel(pairs, ['Stato attivita', 'Stato attività', 'Stato']) || null,
         dipendenti: findLabel(pairs, ['Dipendenti', 'Numero dipendenti', 'Addetti']) || null,
         dataCostituzione: findLabel(pairs, ['Data costituzione', 'Anno fondazione', 'Data iscrizione']) || null,
     };
+}
+
+function needsWebsiteContactPass(company) {
+    return includeWebsiteContacts && company.sitoWeb && (!company.email || !company.telefono || !company.pec);
 }
 
 async function pushCompany(record) {
@@ -352,8 +409,8 @@ const crawler = new CheerioCrawler({
     proxyConfiguration,
     useSessionPool: true,
     maxConcurrency: includeDetails ? 6 : 4,
-    maxRequestRetries: 3,
-    requestHandlerTimeoutSecs: 60,
+    maxRequestRetries: 2,
+    requestHandlerTimeoutSecs: 45,
     additionalMimeTypes: ['text/html'],
     preNavigationHooks: [
         async ({ request }) => {
@@ -361,7 +418,7 @@ const crawler = new CheerioCrawler({
                 ...request.headers,
                 'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/10.1; +https://apify.com/)'
+                'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/10.2; +https://apify.com/)'
             };
         },
     ],
@@ -369,11 +426,56 @@ const crawler = new CheerioCrawler({
     async requestHandler({ $, request, body, log, addRequests }) {
         const { label } = request.userData;
 
-        if (label === 'DETAIL') {
+        if (label === 'CONTACT_HOME' || label === 'CONTACT_PAGE') {
+            const base = request.userData.company ?? {};
+            const contacts = extractContactData($, body, request.url, base.partitaIva);
+            const merged = {
+                ...base,
+                email: base.email || contacts.email,
+                pec: base.pec || contacts.pec,
+                telefono: base.telefono || contacts.telefono,
+                sitoWeb: base.sitoWeb || contacts.sitoWeb,
+                websiteContactScraped: true,
+            };
+
+            if (label === 'CONTACT_HOME' && (!merged.email || !merged.telefono)) {
+                const contactUrl = findContactPageUrl($, request.url);
+                if (contactUrl && !seenContactUrls.has(contactUrl)) {
+                    seenContactUrls.add(contactUrl);
+                    await addRequests([{
+                        url: contactUrl,
+                        userData: { label: 'CONTACT_PAGE', company: merged },
+                        uniqueKey: `contact-page::${contactUrl}::${base.detailUrl}`,
+                    }]);
+                    return;
+                }
+            }
+
             scheduledDetails = Math.max(0, scheduledDetails - 1);
+            await pushCompany(merged);
+            return;
+        }
+
+        if (label === 'DETAIL') {
             const base = request.userData.company ?? {};
             const detail = parseDetail($, body);
-            await pushCompany({ ...base, ...detail, detailScraped: true });
+            const merged = { ...base, ...detail, detailScraped: true };
+
+            if (needsWebsiteContactPass(merged)) {
+                const websiteUrl = cleanWebsite(merged.sitoWeb);
+                if (websiteUrl && !seenContactUrls.has(`${websiteUrl}::${merged.detailUrl}`)) {
+                    seenContactUrls.add(`${websiteUrl}::${merged.detailUrl}`);
+                    await addRequests([{
+                        url: websiteUrl,
+                        userData: { label: 'CONTACT_HOME', company: merged },
+                        uniqueKey: `contact-home::${websiteUrl}::${merged.detailUrl}`,
+                    }]);
+                    return;
+                }
+            }
+
+            scheduledDetails = Math.max(0, scheduledDetails - 1);
+            await pushCompany(merged);
             return;
         }
 
@@ -397,7 +499,7 @@ const crawler = new CheerioCrawler({
         }
 
         const rows = parseRows($, categoria);
-        log.info(`[p${pageNum}] parsed ${rows.length} rows (saved=${savedItems}, queuedDetails=${scheduledDetails}) — ${categoryUrl}`);
+        log.info(`[p${pageNum}] parsed ${rows.length} rows (saved=${savedItems}, pending=${scheduledDetails}) — ${categoryUrl}`);
 
         const detailRequests = [];
         for (const row of rows) {
@@ -434,9 +536,9 @@ const crawler = new CheerioCrawler({
 
     async failedRequestHandler({ request, log }) {
         log.error(`Failed: ${request.url}`);
-        if (request.userData?.label === 'DETAIL' && request.userData?.company) {
+        if ((request.userData?.label === 'DETAIL' || request.userData?.label === 'CONTACT_HOME' || request.userData?.label === 'CONTACT_PAGE') && request.userData?.company) {
             scheduledDetails = Math.max(0, scheduledDetails - 1);
-            await pushCompany({ ...request.userData.company, detailScraped: false, detailError: request.errorMessages?.join(' | ') || 'Detail request failed' });
+            await pushCompany({ ...request.userData.company, detailScraped: request.userData?.label !== 'DETAIL', detailError: request.errorMessages?.join(' | ') || 'Request failed' });
         }
     },
 });
