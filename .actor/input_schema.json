@@ -4,94 +4,45 @@
     "schemaVersion": 1,
     "properties": {
         "category": {
-            "title": "Simple category",
+            "title": "Business category",
             "type": "string",
-            "description": "Enter a simple business category. Supported examples: informatica, software, consulenza, marketing, alimentare, tessile, edilizia, immobiliare, ristorazione, trasporti, turismo, meccanica.",
+            "description": "Choose a simple Italian business category. Supported examples: informatica, software, consulenza, marketing, alimentare, tessile, edilizia, immobiliare, ristorazione, trasporti, turismo, meccanica.",
             "editor": "textfield",
             "default": "informatica"
         },
         "categories": {
             "title": "Additional categories",
             "type": "array",
-            "description": "Extra categories to merge into the search. Use simple words such as software, alimentare, tessile or edilizia. Leave empty if the main category is enough.",
+            "description": "Optional extra categories to merge into the same dataset. Example: software, consulenza. Leave empty for a single-category run.",
             "editor": "stringList",
             "default": []
-        },
-        "dataDepth": {
-            "title": "Data depth",
-            "type": "string",
-            "description": "listing = fast listing data only. full = listing plus company detail enrichment such as VAT number, address, postal code and employees.",
-            "editor": "select",
-            "default": "full",
-            "enum": ["listing", "full"],
-            "enumTitles": ["Fast listing only", "Full company details"]
         },
         "maxItems": {
             "title": "Maximum results",
             "type": "integer",
-            "description": "Maximum number of companies to save. Use 100-500 for tests. Use thousands for production runs.",
+            "description": "Maximum number of companies to save. Listing-only runs are fast. Full-detail runs are slower because each company detail page must be opened.",
             "default": 5000,
             "minimum": 1,
             "maximum": 500000
         },
-        "maxPagesPerCategory": {
-            "title": "Maximum pages per category",
-            "type": "integer",
-            "description": "Safety limit for category pages. Each page usually contains about 25 companies.",
-            "default": 200,
-            "minimum": 1,
-            "maximum": 10000
+        "includeDetails": {
+            "title": "Include company details",
+            "type": "boolean",
+            "description": "Enable this to enrich each company with VAT number, address, postal code and employee range when available. Detail enrichment is slower: based on current tests, about 100 companies with details are pushed to the dataset in roughly 1 minute. For large full-detail runs, increase the Actor run timeout and memory in Run options.",
+            "default": false
         },
         "includeWebsiteContacts": {
             "title": "Try website contact enrichment",
             "type": "boolean",
-            "description": "If a real company website is found, also inspect it for public emails, PEC and phone numbers. This slows runs down and often returns few results because aziende.it rarely exposes company websites.",
+            "description": "Optional advanced enrichment. If a real company website is found, the Actor can try to inspect it for public emails, PEC and phone numbers. This slows runs down and often returns few results because aziende.it rarely exposes company websites.",
             "default": false
-        },
-        "listingConcurrency": {
-            "title": "Listing speed",
-            "type": "integer",
-            "description": "Parallel requests during the fast listing phase. Recommended: 16-24.",
-            "default": 24,
-            "minimum": 1,
-            "maximum": 64
-        },
-        "detailConcurrency": {
-            "title": "Detail speed",
-            "type": "integer",
-            "description": "Parallel requests during the company detail phase. Recommended: 14-18. Higher values may increase retries/timeouts depending on the source response time.",
-            "default": 16,
-            "minimum": 1,
-            "maximum": 64
-        },
-        "listingMaxRequestsPerMinute": {
-            "title": "Listing requests per minute",
-            "type": "integer",
-            "description": "Rate limit for listing pages. Recommended: 180-240.",
-            "default": 240,
-            "minimum": 1,
-            "maximum": 1000
-        },
-        "detailMaxRequestsPerMinute": {
-            "title": "Detail requests per minute",
-            "type": "integer",
-            "description": "Rate limit for detail pages. Recommended: 150-190. Increase carefully if retries remain low.",
-            "default": 170,
-            "minimum": 1,
-            "maximum": 1000
         },
         "startUrls": {
             "title": "Advanced category URLs",
             "type": "array",
-            "description": "Optional. Add specific aziende.it category URLs if you want to bypass the simple presets.",
+            "description": "Optional. Add specific aziende.it category URLs if you want to bypass the simple category presets.",
             "editor": "stringList",
             "default": []
-        },
-        "debug": {
-            "title": "Debug HTML",
-            "type": "boolean",
-            "description": "Save the first category page HTML into the key-value store for selector debugging.",
-            "default": false
         },
         "proxyConfig": {
             "title": "Proxy",
