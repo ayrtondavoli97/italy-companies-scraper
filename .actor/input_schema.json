@@ -40,16 +40,26 @@
         "maxConcurrency": {
             "title": "Velocità / richieste parallele",
             "type": "integer",
-            "description": "Numero massimo di richieste parallele. 8-12 è prudente, 16 è veloce, 24 è aggressivo e può aumentare retry/ban temporanei.",
-            "default": 16,
+            "description": "Numero massimo di richieste parallele. 10-12 è prudente, 14-16 è veloce, oltre 20 è aggressivo e può aumentare retry o blocchi temporanei.",
+            "default": 12,
             "minimum": 1,
             "maximum": 64
         },
-        "parallelPageDiscovery": {
-            "title": "Scansione pagine in parallelo",
-            "type": "boolean",
-            "description": "Quando attivo, dopo la prima pagina programma subito molte pagine della categoria invece di procedere una pagina alla volta. Molto più veloce per run grandi.",
-            "default": true
+        "pageBatchSize": {
+            "title": "Batch pagine categoria",
+            "type": "integer",
+            "description": "Quante nuove pagine categoria programmare per volta. Aumenta la velocità senza creare migliaia di dettagli pendenti. Valori consigliati: 6-12.",
+            "default": 8,
+            "minimum": 1,
+            "maximum": 100
+        },
+        "maxPendingDetails": {
+            "title": "Massimo dettagli pendenti",
+            "type": "integer",
+            "description": "Soglia di backpressure. Quando ci sono troppi dettagli azienda pendenti, il crawler smette temporaneamente di aggiungere nuove pagine categoria. Valori consigliati: 150-300.",
+            "default": 220,
+            "minimum": 25,
+            "maximum": 5000
         },
         "maxPagesPerCategory": {
             "title": "Max pagine per categoria",
