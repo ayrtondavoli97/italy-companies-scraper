@@ -117,13 +117,21 @@ const crawler = new PlaywrightCrawler({
     proxyConfiguration,
     headless: true,
     maxConcurrency: 1,
-    navigationTimeoutSecs: 60,
-    requestHandlerTimeoutSecs: 240,
+    navigationTimeoutSecs: 90,
+    requestHandlerTimeoutSecs: 300,
     launchContext: { launchOptions: { args: ['--disable-blink-features=AutomationControlled'] } },
     preNavigationHooks: [
         async ({ page }, goto) => {
             await page.setViewportSize({ width: 1366, height: 900 });
-            goto.waitUntil = 'domcontentloaded';
+            // Block heavy assets (slow over residential). Keep CSS+JS (grecaptcha
+            // + the submit JS) and document/xhr/fetch.
+            await page.route('**/*', (route) => {
+                const t = route.request().resourceType();
+                if (t === 'image' || t === 'media' || t === 'font') return route.abort();
+                return route.continue();
+            });
+            goto.waitUntil = 'commit'; // fire early; we wait for the form below
+            goto.timeout = 90000;
         },
     ],
 
@@ -131,8 +139,20 @@ const crawler = new PlaywrightCrawler({
         const { prov, term } = request.userData;
         const tag = prov || 'IT';
 
-        // Let the SPA + grecaptcha settle.
-        await page.waitForTimeout(3500);
+        // Wait for the search form to be present (not the whole page load).
+        try {
+            await page.waitForSelector('#inputSearchField, input.inputFiltroRicerca', { timeout: 60000 });
+        } catch {
+            log.warning(`[${tag}] search form never appeared. Dumping for inspection.`);
+            if (debug) {
+                try {
+                    await Actor.setValue(`screenshot_${tag}.png`, await page.screenshot({ fullPage: true }), { contentType: 'image/png' });
+                    await Actor.setValue(`results_${tag}.html`, await page.content(), { contentType: 'text/html; charset=utf-8' });
+                } catch { /* ignore */ }
+            }
+            return;
+        }
+        await page.waitForTimeout(1500); // let grecaptcha attach
 
         // Dismiss Didomi consent banner if present (it can swallow clicks).
         for (const sel of ['#didomi-notice-agree-button', 'button:has-text("Accetta")', 'button:has-text("Acconsenti")', '.didomi-continue-without-agreeing']) {
