@@ -3,12 +3,12 @@
     "name": "aziende-it-scraper",
     "title": "Italy Companies Scraper — companies by simple category",
     "description": "Scrape Italian company listings from aziende.it using simple category names such as informatica, alimentare, tessile, edilizia and more. Optionally enriches results from company detail pages with VAT, tax code, REA, address, PEC, email, phone, website and other public fields when available.",
-    "version": "10.0",
+    "version": "10.3",
     "buildTag": "latest",
     "dockerfile": "./Dockerfile",
     "input": "./input_schema.json",
     "defaultRunOptions": {
-        "timeoutSecs": 3600,
+        "timeoutSecs": 7200,
         "memoryMbytes": 1024
     },
     "storages": {
