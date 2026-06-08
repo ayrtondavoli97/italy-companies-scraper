@@ -31,6 +31,12 @@
             "description": "Apre ogni scheda aziendale e prova a estrarre Partita IVA, codice fiscale, REA, indirizzo, PEC, email, telefono, sito web, forma giuridica, stato attività, dipendenti e data costituzione quando disponibili.",
             "default": true
         },
+        "includeWebsiteContacts": {
+            "title": "Cerca contatti sul sito aziendale",
+            "type": "boolean",
+            "description": "Se la scheda aziende.it contiene un vero sito aziendale, apre homepage e pagina contatti per cercare email, PEC e telefono pubblici. Aumenta le richieste e può rallentare la run.",
+            "default": true
+        },
         "maxPagesPerCategory": {
             "title": "Max pagine per categoria",
             "type": "integer",
