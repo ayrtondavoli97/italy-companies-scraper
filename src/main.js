@@ -1,12 +1,12 @@
 /**
- * Aziende.it Scraper v11.0
+ * Aziende.it Scraper v11.1
  *
- * Two-phase architecture:
- * 1) Listing phase: collect company rows and detail URLs quickly.
- * 2) Detail phase: enrich collected URLs in a separate controlled pass.
+ * Two-phase architecture with bounded listing discovery:
+ * 1) Listing phase collects only the amount of category pages needed for maxItems.
+ * 2) Detail phase enriches the collected company URLs with a separate controlled crawler.
  *
- * This avoids mixing discovery and enrichment, reduces queue bursts, and gives
- * a more predictable throughput without pushing the source too aggressively.
+ * This avoids the v11.0 issue where hundreds of listing pages were still processed
+ * after maxItems had already been collected.
  */
 
 import { Actor } from 'apify';
@@ -138,7 +138,8 @@ function parseTotalResults(body) {
 
 function calculatePageLimit(totalResults) {
     const totalPages = totalResults ? Math.ceil(totalResults / 25) : maxPagesPerCategory;
-    return Math.max(1, Math.min(maxPagesPerCategory, totalPages));
+    const pagesNeededPerCategory = Math.ceil(maxItems / Math.max(1, categoryUrls.length) / 25) + 3;
+    return Math.max(1, Math.min(maxPagesPerCategory, totalPages, pagesNeededPerCategory));
 }
 
 function normalizeUrl(href, base = BASE) {
@@ -389,7 +390,7 @@ const listingCrawler = new CheerioCrawler({
             ...request.headers,
             'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/11.0; +https://apify.com/)'
+            'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/11.1; +https://apify.com/)'
         };
     }],
 
@@ -465,7 +466,7 @@ const detailCrawler = new CheerioCrawler({
             ...request.headers,
             'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/11.0-detail; +https://apify.com/)'
+            'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/11.1-detail; +https://apify.com/)'
         };
     }],
 
