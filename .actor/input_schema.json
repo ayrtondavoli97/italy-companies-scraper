@@ -1,36 +1,56 @@
 {
-    "title": "Aziende.it Scraper — imprese per categoria ATECO",
+    "title": "Italy Companies Scraper",
     "type": "object",
     "schemaVersion": 1,
     "properties": {
-        "startUrls": {
-            "title": "URL categorie ATECO",
+        "category": {
+            "title": "Categoria semplice",
+            "type": "string",
+            "description": "Scrivi una categoria semplice. Esempi supportati: informatica, software, consulenza, marketing, alimentare, tessile, edilizia, immobiliare, ristorazione, trasporti, turismo, meccanica.",
+            "editor": "textfield",
+            "default": "informatica"
+        },
+        "categories": {
+            "title": "Categorie aggiuntive",
             "type": "array",
-            "description": "Una o più pagine-categoria di aziende.it, es: https://www.aziende.it/categorie/servizi-di-informazione-e-comunicazione/62/62.02.0",
+            "description": "Categorie extra da unire alla ricerca. Usa parole semplici come alimentare, tessile, edilizia. Lascia vuoto se ti basta la categoria principale.",
             "editor": "stringList",
-            "default": ["https://www.aziende.it/categorie/servizi-di-informazione-e-comunicazione/62/62.02.0"]
+            "default": []
         },
         "maxItems": {
-            "title": "Max risultati totali",
+            "title": "Numero massimo di aziende",
             "type": "integer",
-            "description": "Numero massimo di aziende da salvare.",
+            "description": "Numero massimo di aziende da salvare nel dataset. Per test usa 100-500. Per dataset grandi puoi salire a migliaia.",
             "default": 5000,
             "minimum": 1,
             "maximum": 500000
         },
+        "includeDetails": {
+            "title": "Estrai dettagli azienda",
+            "type": "boolean",
+            "description": "Apre ogni scheda aziendale e prova a estrarre Partita IVA, codice fiscale, REA, indirizzo, PEC, email, telefono, sito web, forma giuridica, stato attività, dipendenti e data costituzione quando disponibili.",
+            "default": true
+        },
         "maxPagesPerCategory": {
             "title": "Max pagine per categoria",
             "type": "integer",
-            "description": "Limite di pagine (?pag=N) seguite per ciascun URL categoria.",
-            "default": 10,
+            "description": "Limite di pagine (?pag=N) per ogni URL categoria. Ogni pagina contiene circa 25 aziende. Aumenta questo valore per ottenere migliaia di risultati.",
+            "default": 200,
             "minimum": 1,
-            "maximum": 5000
+            "maximum": 10000
+        },
+        "startUrls": {
+            "title": "URL categorie ATECO avanzati",
+            "type": "array",
+            "description": "Opzionale. Inserisci URL categoria aziende.it specifici se vuoi bypassare i preset semplici.",
+            "editor": "stringList",
+            "default": []
         },
         "debug": {
-            "title": "Debug (dump HTML)",
+            "title": "Debug HTML",
             "type": "boolean",
-            "description": "Salva l'HTML della prima pagina nel Key-Value Store per verificare i selettori.",
-            "default": true
+            "description": "Salva l'HTML della prima pagina categoria nel Key-Value Store per verificare i selettori.",
+            "default": false
         },
         "proxyConfig": {
             "title": "Proxy",
@@ -40,5 +60,5 @@
             "default": { "useApifyProxy": true }
         }
     },
-    "required": ["startUrls"]
+    "required": ["category", "maxItems"]
 }
