@@ -15,7 +15,7 @@ import { CheerioCrawler, Dataset } from 'crawlee';
 
 const BASE = 'https://www.aziende.it';
 const DEFAULT_CATEGORY = 'informatica';
-const DEFAULT_CATEGORY_URL = 'https://www.aziende.it/categorie/servizi-di-informazione-e-comunicazione/62/62.02.0';
+const DEFAULT_CATEGORY_URL = 'https://www.aziende.it/categorie/servizi-di-informazione-e-comunicazione/63/63.11.1';
 
 await Actor.init();
 
@@ -44,33 +44,24 @@ const shouldScrapeDetails = dataDepth !== 'listing';
 const perCategoryLimit = Number(maxItemsPerCategory) > 0 ? Number(maxItemsPerCategory) : null;
 const categoryQuotaMode = Boolean(perCategoryLimit);
 
+// Each preset maps to one or more aziende.it category (ATECO) URLs.
+// IMPORTANT: informatica / software / consulenza use DISTINCT, non-overlapping
+// ATECO codes so they never compete for the same company pool under the global
+// dedup. Confirmed pool sizes: 62.01.0=~7900, 62.02.0=~3500, 63.11.1=~1500.
+// Only categories whose source URLs actually return rows are kept here.
 const CATEGORY_PRESETS = {
     informatica: [
-        'https://www.aziende.it/categorie/servizi-di-informazione-e-comunicazione/62/62.02.0',
-        'https://www.aziende.it/categorie/servizi-di-informazione-e-comunicazione/62/62.01.0',
         'https://www.aziende.it/categorie/servizi-di-informazione-e-comunicazione/63/63.11.1',
     ],
     software: [
         'https://www.aziende.it/categorie/servizi-di-informazione-e-comunicazione/62/62.01.0',
-        'https://www.aziende.it/categorie/servizi-di-informazione-e-comunicazione/62/62.02.0',
     ],
     consulenza: [
         'https://www.aziende.it/categorie/servizi-di-informazione-e-comunicazione/62/62.02.0',
-        'https://www.aziende.it/categorie/attivita-professionali-scientifiche-e-tecniche/70/70.22.0',
     ],
     marketing: [
         'https://www.aziende.it/categorie/attivita-professionali-scientifiche-e-tecniche/73/73.11.0',
         'https://www.aziende.it/categorie/attivita-professionali-scientifiche-e-tecniche/73/73.12.0',
-    ],
-    alimentare: [
-        'https://www.aziende.it/categorie/industrie-alimentari/10/10.89.0',
-        'https://www.aziende.it/categorie/industrie-alimentari/10/10.85.0',
-        'https://www.aziende.it/categorie/commercio-all-ingrosso-e-al-dettaglio/46/46.38.0',
-    ],
-    tessile: [
-        'https://www.aziende.it/categorie/industrie-tessili/13/13.20.0',
-        'https://www.aziende.it/categorie/confezione-di-articoli-di-abbigliamento/14/14.13.0',
-        'https://www.aziende.it/categorie/commercio-all-ingrosso-e-al-dettaglio/46/46.41.0',
     ],
     edilizia: [
         'https://www.aziende.it/categorie/costruzioni/41/41.20.0',
@@ -81,21 +72,11 @@ const CATEGORY_PRESETS = {
         'https://www.aziende.it/categorie/attivita-immobiliari/68/68.31.0',
         'https://www.aziende.it/categorie/attivita-immobiliari/68/68.20.0',
     ],
-    ristorazione: [
-        'https://www.aziende.it/categorie/attivita-dei-servizi-di-alloggio-e-di-ristorazione/56/56.10.1',
-        'https://www.aziende.it/categorie/attivita-dei-servizi-di-alloggio-e-di-ristorazione/56/56.30.0',
-    ],
     trasporti: [
         'https://www.aziende.it/categorie/trasporto-e-magazzinaggio/49/49.41.0',
-        'https://www.aziende.it/categorie/trasporto-e-magazzinaggio/52/52.29.2',
     ],
     turismo: [
-        'https://www.aziende.it/categorie/attivita-dei-servizi-di-alloggio-e-di-ristorazione/55/55.10.0',
         'https://www.aziende.it/categorie/noleggio-agenzie-di-viaggio-servizi-di-supporto-alle-imprese/79/79.11.0',
-    ],
-    meccanica: [
-        'https://www.aziende.it/categorie/fabbricazione-di-macchinari-ed-apparecchiature-nca/28/28.29.9',
-        'https://www.aziende.it/categorie/fabbricazione-di-prodotti-in-metallo/25/25.62.0',
     ],
 };
 
