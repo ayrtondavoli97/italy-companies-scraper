@@ -1,8 +1,9 @@
 /**
- * Aziende.it Scraper v10.5
+ * Aziende.it Scraper v10.6
  *
- * Faster controlled mode: detail pages are processed with backpressure, so the
- * crawler does not flood the queue with thousands of pending detail requests.
+ * Controlled high-throughput mode. The crawler keeps a small rolling window of
+ * category pages and detail pages instead of flooding the queue. This improves
+ * throughput while keeping request spikes low.
  */
 
 import { Actor } from 'apify';
@@ -24,8 +25,11 @@ const {
     includeDetails = true,
     includeWebsiteContacts = false,
     maxConcurrency = includeDetails ? 12 : 24,
-    pageBatchSize = 8,
-    maxPendingDetails = includeDetails ? 220 : 0,
+    pageBatchSize = 4,
+    maxPendingDetails = includeDetails ? 180 : 0,
+    maxCategoryPagesQueued = 18,
+    scheduleCooldownMs = 1500,
+    maxRequestsPerMinute = includeDetails ? 140 : 240,
     debug = false,
     proxyConfig: proxyConfigInput,
 } = input;
@@ -113,10 +117,12 @@ if (!urls.length) {
 }
 
 const proxyConfiguration = proxyConfigInput ? await Actor.createProxyConfiguration(proxyConfigInput) : undefined;
-console.log(`Categorie URL: ${urls.length} | maxItems=${maxItems} | maxPagesPerCategory=${maxPagesPerCategory} | includeDetails=${includeDetails} | includeWebsiteContacts=${includeWebsiteContacts} | maxConcurrency=${maxConcurrency} | pageBatchSize=${pageBatchSize} | maxPendingDetails=${maxPendingDetails}`);
+console.log(`Categorie URL: ${urls.length} | maxItems=${maxItems} | maxPagesPerCategory=${maxPagesPerCategory} | includeDetails=${includeDetails} | includeWebsiteContacts=${includeWebsiteContacts} | maxConcurrency=${maxConcurrency} | pageBatchSize=${pageBatchSize} | maxPendingDetails=${maxPendingDetails} | maxCategoryPagesQueued=${maxCategoryPagesQueued} | maxRequestsPerMinute=${maxRequestsPerMinute}`);
 
 let savedItems = 0;
 let pendingDetails = 0;
+let queuedCategoryPages = 0;
+let lastScheduleAt = 0;
 const seenListingUrls = new Set();
 const seenDetailUrls = new Set();
 const seenContactUrls = new Set();
@@ -143,15 +149,20 @@ function calculatePageLimit(totalResults) {
     return Math.max(1, Math.min(maxPagesPerCategory, totalPages, budgetPages));
 }
 
-async function scheduleMoreCategoryPages(addRequests, log) {
+async function scheduleMoreCategoryPages(addRequests, log, force = false) {
     if (!hasBudget()) return;
     if (includeDetails && pendingDetails >= maxPendingDetails) return;
+    if (queuedCategoryPages >= maxCategoryPagesQueued) return;
+
+    const now = Date.now();
+    if (!force && now - lastScheduleAt < scheduleCooldownMs) return;
 
     const states = [...categoryStates.values()].filter(s => !s.done && s.nextPage <= s.pageLimit);
     if (!states.length) return;
 
     const requests = [];
-    let slots = Math.max(1, pageBatchSize);
+    let slots = Math.min(Math.max(1, pageBatchSize), Math.max(0, maxCategoryPagesQueued - queuedCategoryPages));
+
     while (slots > 0 && states.some(s => !s.done && s.nextPage <= s.pageLimit)) {
         for (const state of states) {
             if (slots <= 0) break;
@@ -170,8 +181,10 @@ async function scheduleMoreCategoryPages(addRequests, log) {
     }
 
     if (requests.length) {
+        queuedCategoryPages += requests.length;
+        lastScheduleAt = now;
         await addRequests(requests);
-        log.info(`Scheduled ${requests.length} category pages. saved=${savedItems}, pendingDetails=${pendingDetails}`);
+        log.info(`Scheduled ${requests.length} category pages. saved=${savedItems}, pendingDetails=${pendingDetails}, queuedCategoryPages=${queuedCategoryPages}`);
     }
 }
 
@@ -415,15 +428,16 @@ const crawler = new CheerioCrawler({
     proxyConfiguration,
     useSessionPool: true,
     maxConcurrency,
+    maxRequestsPerMinute,
     maxRequestRetries: 3,
-    requestHandlerTimeoutSecs: 45,
+    requestHandlerTimeoutSecs: 75,
     additionalMimeTypes: ['text/html'],
     preNavigationHooks: [async ({ request }) => {
         request.headers = {
             ...request.headers,
             'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/10.5; +https://apify.com/)'
+            'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/10.6; +https://apify.com/)'
         };
     }],
 
@@ -478,6 +492,7 @@ const crawler = new CheerioCrawler({
         }
 
         const { categoryUrl, pageNum } = request.userData;
+        if (pageNum > 1) queuedCategoryPages = Math.max(0, queuedCategoryPages - 1);
 
         if (debug && pageNum === 1) {
             const safe = (categoryUrl.split('/').pop() || 'cat').replace(/[^\w.-]/g, '_');
@@ -498,7 +513,7 @@ const crawler = new CheerioCrawler({
         }
 
         const rows = parseRows($, categoria);
-        log.info(`[p${pageNum}] parsed ${rows.length} rows (saved=${savedItems}, pendingDetails=${pendingDetails}) — ${categoryUrl}`);
+        log.info(`[p${pageNum}] parsed ${rows.length} rows (saved=${savedItems}, pendingDetails=${pendingDetails}, queuedCategoryPages=${queuedCategoryPages}) — ${categoryUrl}`);
 
         const detailRequests = [];
         for (const row of rows) {
@@ -524,11 +539,12 @@ const crawler = new CheerioCrawler({
             log.info(`[${categoryUrl}] no rows on p${pageNum} — end.`);
         }
 
-        await scheduleMoreCategoryPages(addRequests, log);
+        await scheduleMoreCategoryPages(addRequests, log, pageNum === 1);
     },
 
     async failedRequestHandler({ request, log }) {
         log.error(`Failed: ${request.url}`);
+        if (request.userData?.label === 'CATEGORY' && request.userData?.pageNum > 1) queuedCategoryPages = Math.max(0, queuedCategoryPages - 1);
         if ((request.userData?.label === 'DETAIL' || request.userData?.label === 'CONTACT_HOME' || request.userData?.label === 'CONTACT_PAGE') && request.userData?.company) {
             pendingDetails = Math.max(0, pendingDetails - 1);
             await pushCompany({ ...request.userData.company, detailScraped: request.userData?.label !== 'DETAIL', detailError: request.errorMessages?.join(' | ') || 'Request failed' });
