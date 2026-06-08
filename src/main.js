@@ -1,40 +1,29 @@
 /**
- * Italy Companies Scraper v7
+ * Italy Companies Scraper v8
  * Source: registroimprese.it — "Ricerca libera e acquisto" (official CCIAA registry)
- * Mode:   LISTING ONLY (no detail / no PEC) — base to iterate on.
+ * Mode:   LISTING ONLY (no detail / no PEC).
  *
- * Real search mechanics (reverse-engineered from the landing form):
- *   - Search portlet:  RiRicercaImpreseGratuitaPortlet  (the form)
- *   - Results portlet: RiRisultatiRicercaImpreseGratuitaPortlet (renders rows)
- *   - The form is a POST to a Liferay ACTION url (p_p_lifecycle=1,
- *     javax.portlet.action=cerca) that carries a per-session p_auth token.
- *   - Fields: inputSearchField + filtroInputSearchField = search term;
- *     filtroProvincia = 2-letter province code (e.g. "NA"); soloNonCancellate=S;
- *     filtroScore=S; captchaResp = reCAPTCHA v3 token (EMPTY here — see note).
+ * Why Playwright: the free search is gated by reCAPTCHA Enterprise
+ * (grecaptcha.enterprise.execute(sitekey,{action:'submit'}) -> captchaResp).
+ * A pure-HTTP POST is rejected with 403 (empty token => low score). The only
+ * robust path is to drive the real browser: fill the box, pick the province,
+ * click the real button, and let the site's own JS mint the Enterprise token
+ * with genuine behavioral signals. Pagination ("Successivo") is plain GET and
+ * is NOT captcha-gated, so the captcha cost is once per (keyword, province).
  *
- * Flow: GET landing -> read desktop searchForm (action+p_auth, namespace, all
- * hidden inputs) -> POST form-urlencoded -> follow 302 to the rendered results
- * -> parse rows -> follow "Successivo".
+ * IMPORTANT: Enterprise scores datacenter IPs poorly — use RESIDENTIAL proxy.
+ * The remaining unknown is whether the residential score is high enough; the
+ * recon screenshot + HTML dump (debug=true) tell us immediately.
  *
- * NOTE (reCAPTCHA v3): the page loads grecaptcha with render=<sitekey> and mints
- * captchaResp via JS on submit. We POST with an EMPTY captchaResp. This run is
- * the test of whether the server enforces the v3 score on free search. If it
- * blocks, the next step is minting a token (browser) or a solver — but try
- * HTTP-only first because per-solve cost would wreck the unit economics.
- *
- * HTTP-only (CheerioCrawler / got-scraping); results are server-side rendered.
- * RECON: with debug=true we dump landing + first results HTML to the KV Store
- * to finalize the row selectors against real markup.
+ * RECON: row selectors are finalized from results_*.html / screenshot_*.png on
+ * the first successful run (we have never seen a real results page yet).
  */
 
 import { Actor } from 'apify';
-import { CheerioCrawler, Dataset } from 'crawlee';
-import { load } from 'cheerio';
+import { PlaywrightCrawler } from 'crawlee';
 
 const BASE = 'https://www.registroimprese.it';
-const SEARCH_PATH = '/ricerca-libera-e-acquisto';
-const PORTLET_ID = 'ricercaportlet_WAR_ricercaRIportlet';
-const NS = `_${PORTLET_ID}_`; // Liferay namespaced-parameter prefix
+const SEARCH_URL = `${BASE}/ricerca-libera-e-acquisto`;
 
 const PROVINCE_CODES = {
     'AGRIGENTO':'AG','ALESSANDRIA':'AL','ANCONA':'AN','AOSTA':'AO','AREZZO':'AR',
@@ -60,7 +49,6 @@ const PROVINCE_CODES = {
     'VERCELLI':'VC','VERONA':'VR','VIBO VALENTIA':'VV','VICENZA':'VI','VITERBO':'VT',
     'AQUILA':'AQ',"L'AQUILA":'AQ',
 };
-
 const REGIONE_PROVINCE = {
     'ABRUZZO':['CH','AQ','PE','TE'],'BASILICATA':['MT','PZ'],
     'CALABRIA':['CZ','KR','RC','CS','VV'],'CAMPANIA':['AV','BN','CE','NA','SA'],
@@ -81,242 +69,209 @@ await Actor.init();
 
 const input = (await Actor.getInput()) ?? {};
 const {
-    keyword = 'INFORMATICA',   // free-text term: category / name / ATECO
+    keyword = 'INFORMATICA',
     ateco = '',
     regione = '',
     provincia = '',
     maxItems = 5000,
-    maxPagesPerQuery = 50,     // cap per (keyword, provincia) result set
-    debug = true,              // dump raw HTML/KV artifacts for recon
+    maxPagesPerQuery = 50,
+    debug = true,
     proxyConfig: proxyConfigInput,
 } = input;
 
 const searchTerm = String(keyword || ateco || '').trim();
-if (!searchTerm) {
-    console.error('Obbligatorio: "keyword" (o "ateco") come termine di ricerca.');
-    await Actor.exit(1);
-}
+if (!searchTerm) { console.error('Obbligatorio: "keyword".'); await Actor.exit(1); }
 
-// Resolve province segmentation list.
 const regioneUp = String(regione).toUpperCase().trim();
 const provinciaUp = String(provincia).toUpperCase().trim();
-let provinces; // array of {code, name} | [{code:null}] for Tutta Italia
+let provinces;
 if (provinciaUp) {
     const code = PROVINCE_CODES[provinciaUp]
         || (Object.values(PROVINCE_CODES).includes(provinciaUp) ? provinciaUp : null);
     if (!code) { console.error(`Provincia non riconosciuta: "${provincia}"`); await Actor.exit(1); }
-    const name = Object.keys(PROVINCE_CODES).find(k => PROVINCE_CODES[k] === code) || code;
-    provinces = [{ code, name }];
+    provinces = [code];
 } else if (regioneUp) {
-    const codes = REGIONE_PROVINCE[regioneUp];
-    if (!codes) { console.error(`Regione non riconosciuta: "${regione}"`); await Actor.exit(1); }
-    provinces = codes.map(code => ({
-        code,
-        name: Object.keys(PROVINCE_CODES).find(k => PROVINCE_CODES[k] === code) || code,
-    }));
+    provinces = REGIONE_PROVINCE[regioneUp];
+    if (!provinces) { console.error(`Regione non riconosciuta: "${regione}"`); await Actor.exit(1); }
 } else {
-    provinces = [{ code: null, name: null }]; // Tutta Italia (will hit cap)
+    provinces = [null]; // Tutta Italia
 }
 
-const proxyConfiguration = proxyConfigInput
-    ? await Actor.createProxyConfiguration(proxyConfigInput)
-    : undefined;
+// Default to RESIDENTIAL — Enterprise penalizes datacenter IPs.
+const proxyConfiguration = await Actor.createProxyConfiguration(
+    proxyConfigInput || { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] },
+);
 
-console.log(`Term="${searchTerm}" | province=${provinces.map(p => p.code || 'IT').join(',')} | maxItems=${maxItems}`);
+console.log(`Term="${searchTerm}" | province=${provinces.map(p => p || 'IT').join(',')} | maxItems=${maxItems}`);
 
 let collected = 0;
 const seen = new Set();
 
-const crawler = new CheerioCrawler({
+const startRequests = provinces.map(code => ({
+    url: SEARCH_URL,
+    userData: { prov: code, term: searchTerm },
+    uniqueKey: `q-${code || 'IT'}-${searchTerm}`,
+}));
+
+const crawler = new PlaywrightCrawler({
     proxyConfiguration,
-    useSessionPool: true,
-    persistCookiesPerSession: true,
+    headless: true,
     maxConcurrency: 1,
-    requestHandlerTimeoutSecs: 60,
-    maxRequestRetries: 3,
-    additionalMimeTypes: ['text/html'],
+    navigationTimeoutSecs: 60,
+    requestHandlerTimeoutSecs: 240,
+    launchContext: { launchOptions: { args: ['--disable-blink-features=AutomationControlled'] } },
     preNavigationHooks: [
-        async ({ request }) => {
-            request.headers = {
-                ...request.headers,
-                'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            };
+        async ({ page }, goto) => {
+            await page.setViewportSize({ width: 1366, height: 900 });
+            goto.waitUntil = 'domcontentloaded';
         },
     ],
 
-    async requestHandler({ $, request, log, sendRequest }) {
-        const { prov, provName, term } = request.userData;
+    async requestHandler({ page, request, log }) {
+        const { prov, term } = request.userData;
+        const tag = prov || 'IT';
 
-        // (1) Landing already fetched as $ (GET, same session below).
+        // Let the SPA + grecaptcha settle.
+        await page.waitForTimeout(3500);
+
+        // Dismiss Didomi consent banner if present (it can swallow clicks).
+        for (const sel of ['#didomi-notice-agree-button', 'button:has-text("Accetta")', 'button:has-text("Acconsenti")', '.didomi-continue-without-agreeing']) {
+            try {
+                const b = page.locator(sel).first();
+                if (await b.isVisible({ timeout: 1500 })) { await b.click(); await page.waitForTimeout(400); break; }
+            } catch { /* ignore */ }
+        }
+
+        // Fill the search box (try id, then the autocomplete class, desktop one).
+        let filled = false;
+        for (const sel of ['#inputSearchField', 'input.inputFiltroRicerca:not(.inputFiltroRicercaMob)', 'input.inputFiltroRicerca']) {
+            try {
+                const inp = page.locator(sel).first();
+                if (await inp.isVisible({ timeout: 2000 })) {
+                    await inp.click();
+                    await inp.fill(term);
+                    filled = true;
+                    log.info(`[${tag}] filled search via ${sel}`);
+                    break;
+                }
+            } catch { /* try next */ }
+        }
+        if (!filled) log.warning(`[${tag}] could not find the search input`);
+
+        // Select province on the underlying <select> (site JS reads it on submit).
+        if (prov) {
+            try {
+                await page.selectOption('#selectPrv', prov, { timeout: 3000 });
+                log.info(`[${tag}] province selected: ${prov}`);
+            } catch (e) { log.warning(`[${tag}] selectPrv failed: ${e.message}`); }
+        }
+        await page.waitForTimeout(600);
+
+        // Click the real search button -> triggers grecaptcha.enterprise + submit.
+        let clicked = false;
+        for (const sel of ['#btnCercaGratuita', 'button:has-text("CERCA")', '.btn-cerca-gratuita']) {
+            try {
+                const b = page.locator(sel).first();
+                if (await b.isVisible({ timeout: 2000 })) {
+                    await Promise.all([
+                        page.waitForLoadState('domcontentloaded', { timeout: 35000 }).catch(() => {}),
+                        b.click(),
+                    ]);
+                    clicked = true;
+                    log.info(`[${tag}] clicked search via ${sel}`);
+                    break;
+                }
+            } catch { /* try next */ }
+        }
+        if (!clicked) log.warning(`[${tag}] could not find/click the search button`);
+
+        // Give the results render time to settle.
+        await page.waitForTimeout(4000);
+        await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+        // RECON artifacts.
         if (debug) {
-            await Actor.setValue(`landing_${prov || 'IT'}.html`, $.html(), { contentType: 'text/html; charset=utf-8' });
+            try {
+                const shot = await page.screenshot({ fullPage: true });
+                await Actor.setValue(`screenshot_${tag}.png`, shot, { contentType: 'image/png' });
+                await Actor.setValue(`results_${tag}.html`, await page.content(), { contentType: 'text/html; charset=utf-8' });
+            } catch (e) { log.warning(`[${tag}] dump failed: ${e.message}`); }
         }
 
-        // (2) Read the desktop searchForm: action(+p_auth), namespace, fields.
-        let $form = $('form[name$="_searchForm"]').first();
-        if ($form.length === 0) $form = $('form[name$="_searchFormMob"]').first();
-        if ($form.length === 0) { log.error(`[${prov || 'IT'}] searchForm not found.`); return; }
-
-        const action = ($form.attr('action') || '').replace(/&amp;/g, '&');
-        const ns = $form.attr('data-fm-namespace') || NS;
-        const payload = new URLSearchParams();
-        $form.find('input, select, textarea').each((_, el) => {
-            const name = $(el).attr('name');
-            if (name) payload.set(name, $(el).attr('value') || '');
-        });
-        payload.set(`${ns}inputSearchField`, term);
-        payload.set(`${ns}filtroInputSearchField`, term);
-        payload.set(`${ns}filtroProvincia`, prov || ''); // '' = Tutta Italia
-        payload.set(`${ns}soloNonCancellate`, 'S');
-        payload.set(`${ns}filtroScore`, 'S');
-        payload.set(`${ns}captchaResp`, '');
-
-        const navHeaders = {
-            'content-type': 'application/x-www-form-urlencoded',
-            'referer': `${BASE}${SEARCH_PATH}`,
-            'origin': BASE,
-            'cache-control': 'max-age=0',
-            'upgrade-insecure-requests': '1',
-            'sec-fetch-dest': 'document',
-            'sec-fetch-mode': 'navigate',
-            'sec-fetch-site': 'same-origin',
-            'sec-fetch-user': '?1',
-        };
-        log.info(`[${prov || 'IT'}] POST search term="${term}" fields=${[...payload.keys()].length}`);
-
-        // (3) POST in the SAME session as the landing GET (shared cookie jar),
-        //     so the per-session p_auth stays valid. Don't throw on 4xx so we
-        //     can capture the block page.
-        let resp;
-        try {
-            resp = await sendRequest({
-                url: action, method: 'POST', headers: navHeaders,
-                body: payload.toString(), throwHttpErrors: false, followRedirect: true,
-            });
-        } catch (e) { log.error(`[${prov || 'IT'}] POST error: ${e.message}`); return; }
-
-        let html = typeof resp.body === 'string' ? resp.body : String(resp.body);
-        log.info(`[${prov || 'IT'}] POST status=${resp.statusCode} finalUrl=${resp.url || action} bodyLen=${html.length}`);
-        if (debug) await Actor.setValue(`post_response_${prov || 'IT'}.html`, html, { contentType: 'text/html; charset=utf-8' });
-
-        if (resp.statusCode >= 400) {
-            log.warning(`[${prov || 'IT'}] BLOCKED status=${resp.statusCode}. Inspect post_response_${prov || 'IT'}.html (WAF? Liferay auth? captcha?).`);
-            return;
+        // Did the search execute, or are we blocked / still on the form?
+        const bodyText = await page.evaluate(() => document.body.innerText || '').catch(() => '');
+        const executed = /hai cercato/i.test(bodyText) || /risultati/i.test(bodyText);
+        log.info(`[${tag}] after submit: url=${page.url()} executed=${executed}`);
+        if (!executed) {
+            log.warning(`[${tag}] no results detected — likely reCAPTCHA Enterprise score block. Check screenshot_${tag}.png.`);
         }
 
-        // (4) Parse + paginate via sendRequest in the SAME session.
+        // Parse + paginate.
         let pageNum = 1;
         while (true) {
-            const $$ = load(html);
-            if (debug && pageNum === 1) {
-                await Actor.setValue(`results_${prov || 'IT'}_p1.html`, html, { contentType: 'text/html; charset=utf-8' });
-            }
-            const executed = /hai cercato/i.test(html);
-            const looksLikeForm = $$('form[name$="_searchForm"]').length > 0 && !executed;
-            if (pageNum === 1) log.info(`[${prov || 'IT'}] results: executed=${executed} looksLikeForm=${looksLikeForm}`);
+            const probe = await page.evaluate(() => {
+                const scope = document.querySelector('[id*="RiRisultatiRicercaImpreseGratuita"]') || document.body;
+                const tries = {
+                    'table tbody tr': scope.querySelectorAll('table tbody tr').length,
+                    '[class*=risultat] [class*=row]': scope.querySelectorAll('[class*="risultat"] [class*="row"]').length,
+                    '[class*=elenco] [class*=row]': scope.querySelectorAll('[class*="elenco"] [class*="row"]').length,
+                    'div[class*=card]': scope.querySelectorAll('div[class*="card"]').length,
+                    'li[class*=item]': scope.querySelectorAll('li[class*="item"]').length,
+                };
+                return tries;
+            });
+            log.info(`[${tag}] p${pageNum} selector probe: ${JSON.stringify(probe)}`);
 
-            const rows = parseListing($$, { prov });
-            log.info(`[${prov || 'IT'}] page ${pageNum}: parsed ${rows.length} rows (total ${collected})`);
+            const rows = await page.evaluate(() => {
+                const scope = document.querySelector('[id*="RiRisultatiRicercaImpreseGratuita"]') || document.body;
+                let nodes = [...scope.querySelectorAll('table tbody tr')];
+                if (nodes.length === 0) nodes = [...scope.querySelectorAll('[class*="risultat"] [class*="row"], [class*="elenco"] [class*="row"]')];
+                const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+                return nodes.map(n => {
+                    const tds = [...n.querySelectorAll('td')].map(td => clean(td.textContent));
+                    const a = n.querySelector('a[href]');
+                    if (tds.length >= 4 && tds[0] && tds[0].length > 1) {
+                        return {
+                            ragioneSociale: tds[0], comune: tds[2] || '',
+                            formaGiuridica: tds[3] || '', descrizione: tds[4] || '',
+                            stato: tds[5] || '', detailUrl: a ? a.href : '',
+                        };
+                    }
+                    return null;
+                }).filter(Boolean);
+            });
+
+            log.info(`[${tag}] page ${pageNum}: parsed ${rows.length} rows (total ${collected})`);
             for (const row of rows) {
                 if (collected >= maxItems) break;
                 const k = `${row.ragioneSociale}|${row.comune}|${row.descrizione}`;
                 if (seen.has(k)) continue;
                 seen.add(k);
-                await Dataset.pushData(row);
+                await Actor.pushData({ ...row, provincia: prov || '' });
                 collected++;
             }
             if (collected >= maxItems) { log.info('maxItems reached.'); break; }
             if (pageNum >= maxPagesPerQuery) { log.info('maxPagesPerQuery reached.'); break; }
 
-            let nextHref = null;
-            $$('a').each((_, a) => {
-                const t = $$(a).text().trim().toLowerCase();
-                const h = $$(a).attr('href');
-                if (t === 'successivo' && h && h !== '#') nextHref = h;
-            });
-            if (!nextHref) { log.info(`[${prov || 'IT'}] no "Successivo" — end of results or cap.`); break; }
-
-            const nextUrl = nextHref.startsWith('http') ? nextHref : `${BASE}${nextHref.startsWith('/') ? '' : '/'}${nextHref}`;
-            let r2;
+            // "Successivo" — plain navigation, no captcha.
+            const next = page.locator('a:has-text("Successivo")').first();
+            const hasNext = await next.count() > 0 && await next.isVisible().catch(() => false);
+            if (!hasNext) { log.info(`[${tag}] no "Successivo" — end of results or cap.`); break; }
             try {
-                r2 = await sendRequest({
-                    url: nextUrl,
-                    headers: { 'referer': resp.url || `${BASE}${SEARCH_PATH}`, 'upgrade-insecure-requests': '1', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' },
-                    throwHttpErrors: false,
-                });
-            } catch (e) { log.warning(`[${prov || 'IT'}] pagination error: ${e.message}`); break; }
-            if (r2.statusCode >= 400) { log.warning(`[${prov || 'IT'}] pagination BLOCKED status=${r2.statusCode}.`); break; }
-            html = typeof r2.body === 'string' ? r2.body : String(r2.body);
-            pageNum++;
-            await new Promise(r => setTimeout(r, 800));
+                await Promise.all([
+                    page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {}),
+                    next.click(),
+                ]);
+                await page.waitForTimeout(1500);
+                pageNum++;
+            } catch (e) { log.warning(`[${tag}] pagination failed: ${e.message}`); break; }
         }
     },
 
-        failedRequestHandler({ request, log }) {
+    failedRequestHandler({ request, log }) {
         log.error(`Failed: ${request.url}`);
     },
 });
-
-/**
- * Parse one results page into listing rows.
- * NOTE: selectors are still best-effort. The rows render inside the
- * RiRisultatiRicercaImpreseGratuitaPortlet container; we scope there and log
- * candidate-selector counts so the real row structure is obvious from the logs.
- * Finalized against results_*_p1.html after this run.
- */
-function parseListing($, { prov }) {
-    const out = [];
-
-    // Scope to the results portlet if present, else whole doc.
-    let $scope = $('[id*="RiRisultatiRicercaImpreseGratuita"]');
-    if ($scope.length === 0) $scope = $.root();
-
-    // Probe candidate row containers and log their counts (recon aid).
-    const candidates = [
-        'table tbody tr',
-        '[class*="risultat"] [class*="row"]',
-        '[class*="result"] [class*="item"]',
-        '[class*="elenco"] [class*="row"]',
-        'li[class*="item"]',
-        'div[class*="card"]',
-    ];
-    const probe = candidates.map(sel => `${sel}=${$scope.find(sel).length}`);
-    console.log(`parseListing probe [${prov || 'IT'}]: ${probe.join(' | ')}`);
-
-    let chosen = null;
-    for (const sel of candidates) {
-        if ($scope.find(sel).length > 0) { chosen = sel; break; }
-    }
-    if (!chosen) return out;
-
-    $scope.find(chosen).each((_, el) => {
-        const cells = $(el).find('td');
-        if (cells.length >= 4) {
-            // Table layout: Nome | Sede | Comune | Forma | Descrizione | Stato
-            const txt = i => $(cells[i]).text().replace(/\s+/g, ' ').trim();
-            const nome = txt(0);
-            if (!nome || nome.length < 2) return;
-            const link = $(el).find('a[href]').attr('href') || '';
-            out.push({
-                ragioneSociale: nome,
-                comune: txt(2),
-                provincia: prov || '',
-                formaGiuridica: txt(3),
-                descrizione: txt(4),
-                stato: txt(5),
-                detailUrl: link.startsWith('http') ? link : (link ? `${BASE}${link}` : ''),
-            });
-        }
-    });
-    return out;
-}
-
-const startRequests = provinces.map(p => ({
-    url: `${BASE}${SEARCH_PATH}`,
-    userData: { label: 'LANDING', prov: p.code, provName: p.name, term: searchTerm, pageNum: 0 },
-    uniqueKey: `landing-${p.code || 'IT'}-${searchTerm}`,
-}));
 
 await crawler.run(startRequests);
 console.log(`Done. Total saved: ${collected} companies.`);
