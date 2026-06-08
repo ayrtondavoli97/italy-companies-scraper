@@ -2,12 +2,15 @@
     "actorSpecification": 1,
     "name": "italy-companies-scraper",
     "title": "Italy Companies Scraper — Search by Region & Province",
-    "description": "Extract Italian company data from registroimprese.it (official CCIAA registry) by geographic area. Input: region or province. Optional: ATECO code, legal form, company status.",
-    "version": "2.0",
+    "description": "Extract Italian company listings from registroimprese.it (ricerca libera, official CCIAA registry) by free-text keyword/category, segmented by region/province. Listing-only base.",
+    "version": "3.0",
     "buildTag": "latest",
     "dockerfile": "./Dockerfile",
     "input": "./input_schema.json",
-    "defaultRunOptions": { "timeoutSecs": 600, "memoryMbytes": 1024 },
+    "defaultRunOptions": {
+        "timeoutSecs": 600,
+        "memoryMbytes": 1024
+    },
     "storages": {
         "dataset": {
             "actorSpecification": 1,
@@ -15,19 +18,48 @@
             "views": {
                 "overview": {
                     "title": "Companies",
-                    "transformation": { "fields": ["ragioneSociale","cf","comune","provincia","indirizzo","ateco","formaGiuridica","stato","detailUrl"] },
+                    "transformation": {
+                        "fields": [
+                            "ragioneSociale",
+                            "comune",
+                            "provincia",
+                            "formaGiuridica",
+                            "descrizione",
+                            "stato",
+                            "detailUrl"
+                        ]
+                    },
                     "display": {
                         "component": "table",
                         "properties": {
-                            "ragioneSociale": { "label": "Ragione Sociale", "format": "text" },
-                            "cf":             { "label": "CF / P.IVA",      "format": "text" },
-                            "comune":         { "label": "Comune",           "format": "text" },
-                            "provincia":      { "label": "Provincia",        "format": "text" },
-                            "indirizzo":      { "label": "Indirizzo",        "format": "text" },
-                            "ateco":          { "label": "ATECO",            "format": "text" },
-                            "formaGiuridica": { "label": "Forma Giuridica",  "format": "text" },
-                            "stato":          { "label": "Stato",            "format": "text" },
-                            "detailUrl":      { "label": "Scheda",           "format": "link" }
+                            "ragioneSociale": {
+                                "label": "Ragione Sociale",
+                                "format": "text"
+                            },
+                            "comune": {
+                                "label": "Comune",
+                                "format": "text"
+                            },
+                            "provincia": {
+                                "label": "Provincia",
+                                "format": "text"
+                            },
+                            "formaGiuridica": {
+                                "label": "Forma Giuridica",
+                                "format": "text"
+                            },
+                            "descrizione": {
+                                "label": "Attività",
+                                "format": "text"
+                            },
+                            "stato": {
+                                "label": "Stato",
+                                "format": "text"
+                            },
+                            "detailUrl": {
+                                "label": "Scheda",
+                                "format": "link"
+                            }
                         }
                     }
                 }

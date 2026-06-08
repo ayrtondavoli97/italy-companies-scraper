@@ -1,12 +1,34 @@
 /**
- * Italy Companies Scraper v5
- * Source: inipec.gov.it — public government registry (no auth required by law)
- * Scrapes: ragione sociale, PEC, provincia, CF
- * Input: regione or provincia (required)
+ * Italy Companies Scraper v6
+ * Source: registroimprese.it — "Ricerca libera e acquisto" (official CCIAA registry)
+ * Mode:   LISTING ONLY (no detail / no PEC) — base to iterate on.
+ *
+ * Strategy:
+ *   - Free-text search: the keyword can be a CATEGORY (es. "INFORMATICA"),
+ *     a company name, or an ATECO code/description. The portlet matches it
+ *     against name + activity description + ATECO.
+ *   - Geographic segmentation to beat the result cap: search is repeated per
+ *     province (from `regione` expansion or a single `provincia`). Without a
+ *     geo filter it runs one "Tutta Italia" pass (will hit the portlet cap).
+ *   - Pagination by FOLLOWING the "Successivo" link, which carries the
+ *     pageToken of the next page (a Liferay JWT). We never build tokens.
+ *
+ * HTTP-only (CheerioCrawler / got-scraping). The results page is server-side
+ * rendered, so no browser is needed. The Didomi consent banner is a JS overlay
+ * and does not affect HTTP requests.
+ *
+ * RECON: on the first results page per province we dump the raw HTML to the
+ * KV Store (debug=true) so the row selectors and the exact search params can
+ * be finalized against the real markup on the first Apify run.
  */
 
 import { Actor } from 'apify';
-import { PlaywrightCrawler } from 'crawlee';
+import { CheerioCrawler, Dataset } from 'crawlee';
+
+const BASE = 'https://www.registroimprese.it';
+const SEARCH_PATH = '/ricerca-libera-e-acquisto';
+const PORTLET_ID = 'ricercaportlet_WAR_ricercaRIportlet';
+const NS = `_${PORTLET_ID}_`; // Liferay namespaced-parameter prefix
 
 const PROVINCE_CODES = {
     'AGRIGENTO':'AG','ALESSANDRIA':'AL','ANCONA':'AN','AOSTA':'AO','AREZZO':'AR',
@@ -30,6 +52,7 @@ const PROVINCE_CODES = {
     'TERNI':'TR','TORINO':'TO','TRAPANI':'TP','TRENTO':'TN','TREVISO':'TV',
     'TRIESTE':'TS','UDINE':'UD','VARESE':'VA','VENEZIA':'VE','VERBANO-CUSIO-OSSOLA':'VB',
     'VERCELLI':'VC','VERONA':'VR','VIBO VALENTIA':'VV','VICENZA':'VI','VITERBO':'VT',
+    'AQUILA':'AQ',"L'AQUILA":'AQ',
 };
 
 const REGIONE_PROVINCE = {
@@ -50,213 +73,214 @@ const REGIONE_PROVINCE = {
 
 await Actor.init();
 
-const input = await Actor.getInput() ?? {};
+const input = (await Actor.getInput()) ?? {};
 const {
-    regione = '', provincia = '', ateco = '',
-    maxItems = 5000, proxyConfig: proxyConfigInput,
+    keyword = 'INFORMATICA',   // free-text term: category / name / ATECO
+    ateco = '',
+    regione = '',
+    provincia = '',
+    maxItems = 5000,
+    maxPagesPerQuery = 50,     // cap per (keyword, provincia) result set
+    debug = true,              // dump raw HTML/KV artifacts for recon
+    proxyConfig: proxyConfigInput,
 } = input;
 
-let provinceCodes = [];
-const regioneUp = regione.toUpperCase().trim();
-const provinciaUp = provincia.toUpperCase().trim();
+const searchTerm = String(keyword || ateco || '').trim();
+if (!searchTerm) {
+    console.error('Obbligatorio: "keyword" (o "ateco") come termine di ricerca.');
+    await Actor.exit(1);
+}
 
+// Resolve province segmentation list.
+const regioneUp = String(regione).toUpperCase().trim();
+const provinciaUp = String(provincia).toUpperCase().trim();
+let provinces; // array of {code, name} | [{code:null}] for Tutta Italia
 if (provinciaUp) {
-    const code = PROVINCE_CODES[provinciaUp] || (Object.values(PROVINCE_CODES).includes(provinciaUp) ? provinciaUp : null);
+    const code = PROVINCE_CODES[provinciaUp]
+        || (Object.values(PROVINCE_CODES).includes(provinciaUp) ? provinciaUp : null);
     if (!code) { console.error(`Provincia non riconosciuta: "${provincia}"`); await Actor.exit(1); }
-    provinceCodes = [code];
+    const name = Object.keys(PROVINCE_CODES).find(k => PROVINCE_CODES[k] === code) || code;
+    provinces = [{ code, name }];
 } else if (regioneUp) {
-    provinceCodes = REGIONE_PROVINCE[regioneUp];
-    if (!provinceCodes) { console.error(`Regione non riconosciuta: "${regione}"`); await Actor.exit(1); }
+    const codes = REGIONE_PROVINCE[regioneUp];
+    if (!codes) { console.error(`Regione non riconosciuta: "${regione}"`); await Actor.exit(1); }
+    provinces = codes.map(code => ({
+        code,
+        name: Object.keys(PROVINCE_CODES).find(k => PROVINCE_CODES[k] === code) || code,
+    }));
 } else {
-    console.error('Obbligatorio: "regione" o "provincia"'); await Actor.exit(1);
+    provinces = [{ code: null, name: null }]; // Tutta Italia (will hit cap)
 }
 
 const proxyConfiguration = proxyConfigInput
     ? await Actor.createProxyConfiguration(proxyConfigInput)
     : undefined;
 
-console.log(`Province: ${provinceCodes.join(', ')} | maxItems: ${maxItems}`);
+console.log(`Term="${searchTerm}" | province=${provinces.map(p => p.code || 'IT').join(',')} | maxItems=${maxItems}`);
 
 let collected = 0;
+const seen = new Set();
 
-const BASE_URL = 'https://www.inipec.gov.it/cerca-pec/-/pec/imprese';
+/** Build the search URL. Param names are the best reconstruction of the Liferay
+ *  portlet render request; finalized on first run from the dumped landing form. */
+function buildSearchUrl({ token, term, provName }) {
+    const params = new URLSearchParams({
+        p_p_id: PORTLET_ID,
+        p_p_lifecycle: '0',
+        p_p_state: 'normal',
+    });
+    if (token) params.set(`${NS}pageToken`, token);
+    params.set(`${NS}keyword`, term);
+    if (provName) params.set(`${NS}provincia`, provName);
+    return `${BASE}${SEARCH_PATH}?${params.toString()}`;
+}
 
-const startUrls = provinceCodes.map(prov => ({
-    url: BASE_URL,
-    userData: { prov, page: 1, isFirst: true },
-}));
-
-const crawler = new PlaywrightCrawler({
+const crawler = new CheerioCrawler({
     proxyConfiguration,
-    launchContext: { launchOptions: { headless: true } },
-    requestHandlerTimeoutSecs: 120,
-    maxConcurrency: 1,
-    navigationTimeoutSecs: 45,
+    useSessionPool: true,
+    persistCookiesPerSession: true,
+    maxConcurrency: 2,
+    requestHandlerTimeoutSecs: 60,
+    maxRequestRetries: 3,
+    additionalMimeTypes: ['text/html'],
     preNavigationHooks: [
-        async (_ctx, gotoOptions) => { gotoOptions.waitUntil = 'networkidle'; },
+        async ({ request }) => {
+            request.headers = {
+                ...request.headers,
+                'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            };
+        },
     ],
 
-    async requestHandler({ page, request, log, addRequests }) {
-        const { prov, page: pageNum, isFirst } = request.userData;
-        log.info(`INI-PEC | Prov=${prov} page=${pageNum}`);
+    async requestHandler({ $, request, body, log, addRequests }) {
+        const { label, prov, provName, term, pageNum } = request.userData;
 
-        if (isFirst) {
-            // Load page and fill the search form
-            await page.goto(BASE_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-            await page.waitForTimeout(2000);
+        // ---- LANDING: capture token + discover the real form params -------
+        if (label === 'LANDING') {
+            const html = typeof body === 'string' ? body : body.toString();
 
-            // Wait longer for the PEC form to load (Angular/JS app)
-            await page.waitForTimeout(8000);
-            // Take screenshot to see actual rendered page
-            const screenshot = await page.screenshot({ fullPage: true });
-            await Actor.setValue(`screenshot_${prov}`, screenshot, { contentType: 'image/png' });
-            log.info('Screenshot saved');
+            // Token from a link/hidden field on the landing page.
+            const m = html.match(new RegExp(`${NS}pageToken=([A-Za-z0-9._\\-]+)`));
+            const token = m ? m[1] : null;
 
-            // Check if there's an Angular/React app container
-            const appInfo = await page.evaluate(() => {
-                const body = document.body.innerHTML;
-                return {
-                    hasAngular: body.includes('ng-') || body.includes('ng-app') || !!document.querySelector('[ng-app], [data-ng-app], app-root'),
-                    hasReact: !!document.querySelector('#root, #app, [data-reactroot]'),
-                    scripts: [...document.querySelectorAll('script[src]')].map(s => s.src).filter(s => s.includes('app') || s.includes('main') || s.includes('bundle')).slice(0,5),
-                    bodyLength: body.length,
-                    divCount: document.querySelectorAll('div').length,
-                };
+            // Discover the search form's real input names (so we stop guessing).
+            const forms = [];
+            $('form').each((_, f) => {
+                const inputs = [];
+                $(f).find('input,select,textarea').each((__, el) => {
+                    const name = $(el).attr('name');
+                    if (name) inputs.push({ name, type: $(el).attr('type') || el.tagName });
+                });
+                forms.push({ action: $(f).attr('action') || '', method: $(f).attr('method') || 'get', inputs });
             });
-            log.info(`App info: ${JSON.stringify(appInfo)}`);
+            log.info(`[${prov || 'IT'}] LANDING token=${token ? 'ok' : 'MISSING'} | forms=${JSON.stringify(forms).slice(0, 1200)}`);
 
-            // Dismiss cookie banner if present
-            try {
-                const okBtn = page.locator('a:has-text("OK"), button:has-text("OK"), .cookie-btn').first();
-                if (await okBtn.isVisible({ timeout: 2000 })) { await okBtn.click(); await page.waitForTimeout(500); }
-            } catch { /* ignore */ }
-
-            // Debug: save form HTML before filling
-            const html0 = await page.content();
-            await Actor.setValue(`debug_form_${prov}`, html0, { contentType: 'text/html' });
-            const txt0 = await page.evaluate(() => document.body.innerText);
-            log.info(`Form page preview:\n${txt0.substring(0, 400)}`);
-
-            // Check for iframes (PEC form might be inside one)
-            const frames = page.frames();
-            log.info(`Frames on page: ${frames.length}`);
-            for (const f of frames) {
-                log.info(`  Frame URL: ${f.url()}`);
+            if (debug) {
+                await Actor.setValue(`landing_${prov || 'IT'}.html`, html, { contentType: 'text/html; charset=utf-8' });
             }
 
-            // Log all links to find the real PEC search page
-            const links = await page.evaluate(() =>
-                [...document.querySelectorAll('a[href]')]
-                    .map(a => ({ text: a.textContent.trim().substring(0,40), href: a.href }))
-                    .filter(a => a.text && (a.href.includes('pec') || a.href.includes('cerca') || a.href.includes('ricerca') || a.text.toLowerCase().includes('impresa') || a.text.toLowerCase().includes('cerca')))
-            );
-            log.info(`Relevant links: ${JSON.stringify(links)}`);
-
-            // Log all inputs across all frames
-            for (const f of frames) {
-                try {
-                    const fInputs = await f.evaluate(() =>
-                        [...document.querySelectorAll('input, select, textarea')].map(el => ({
-                            tag: el.tagName, type: el.type, name: el.name?.substring(0,50), id: el.id?.substring(0,50),
-                            visible: el.offsetParent !== null
-                        })).filter(i => i.visible)
-                    );
-                    if (fInputs.length > 0) log.info(`Frame ${f.url().substring(0,50)} visible inputs: ${JSON.stringify(fInputs)}`);
-                } catch { /* cross-origin */ }
-            }
-
-            // Find and fill provincia field
-            // INI-PEC has a select dropdown for provincia
-            try {
-                // Try select dropdown first
-                const provSel = page.locator('select[name*="provincia"], select[id*="provincia"]').first();
-                if (await provSel.isVisible({ timeout: 3000 })) {
-                    await provSel.selectOption(prov);
-                    log.info(`Province selected in dropdown: ${prov}`);
-                } else {
-                    // Try text input
-                    const provInput = page.locator('input[name*="provincia"], input[id*="provincia"]').first();
-                    if (await provInput.isVisible({ timeout: 3000 })) {
-                        await provInput.fill(prov);
-                        log.info(`Province typed in input: ${prov}`);
-                    }
-                }
-            } catch(e) { log.warning(`Province field error: ${e.message}`); }
-
-            // Submit
-            try {
-                const submitBtn = page.locator('input[type="submit"], button[type="submit"], .btn-cerca, button:has-text("Cerca")').first();
-                if (await submitBtn.isVisible({ timeout: 3000 })) {
-                    await submitBtn.click();
-                    await page.waitForLoadState('domcontentloaded', { timeout: 20_000 });
-                    log.info(`Submitted | URL: ${page.url()}`);
-                }
-            } catch(e) { log.warning(`Submit error: ${e.message}`); }
-
-            await page.waitForTimeout(1000);
-        } else {
-            await page.goto(request.url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-            await page.waitForTimeout(1000);
+            await addRequests([{
+                url: buildSearchUrl({ token, term, provName }),
+                userData: { label: 'RESULTS', prov, provName, term, pageNum: 1 },
+            }]);
+            return;
         }
 
-        // Full debug on first page
-        if (pageNum === 1) {
-            const html = await page.content();
-            await Actor.setValue(`debug_results_${prov}_p1`, html, { contentType: 'text/html' });
-            const txt = await page.evaluate(() => document.body.innerText);
-            await Actor.setValue(`debug_text_${prov}_p1`, txt, { contentType: 'text/plain' });
-            log.info(`Results debug saved | Text preview:\n${txt.substring(0, 500)}`);
+        // ---- RESULTS: parse listing rows + follow "Successivo" ------------
+        const html = typeof body === 'string' ? body : body.toString();
+        if (debug && pageNum === 1) {
+            await Actor.setValue(`results_${prov || 'IT'}_p1.html`, html, { contentType: 'text/html; charset=utf-8' });
         }
 
-        // Parse results table
-        const { items, totalPages } = await page.evaluate(() => {
-            // INI-PEC shows results in a table
-            const rows = [...document.querySelectorAll('table tbody tr, .risultati tr, [class*="result"] tr')];
+        const rows = parseListing($, { prov });
+        log.info(`[${prov || 'IT'}] page ${pageNum}: parsed ${rows.length} rows (total ${collected})`);
 
-            const items = rows.map(row => {
-                const cells = [...row.querySelectorAll('td')].map(td => td.textContent.trim());
-                if (cells.length < 2) return null;
-                return {
-                    ragioneSociale: cells[0] || '',
-                    cf: cells[1] || '',
-                    provincia: cells[2] || '',
-                    pec: cells[3] || '',
-                };
-            }).filter(r => r && r.ragioneSociale && r.ragioneSociale.length > 1);
-
-            // Total pages from pagination
-            const pagLinks = [...document.querySelectorAll('a[href*="cur="], .pagination a, [class*="page"] a')]
-                .map(a => parseInt(a.textContent.trim()))
-                .filter(n => !isNaN(n) && n > 0);
-            const totalPages = pagLinks.length ? Math.max(...pagLinks) : 1;
-
-            return { items, totalPages };
-        });
-
-        log.info(`Prov=${prov} p${pageNum}/${totalPages}: ${items.length} companies`);
-
-        for (const item of items) {
+        for (const row of rows) {
             if (collected >= maxItems) break;
-            await Actor.pushData({ ...item, _provincia: prov, _regione: regioneUp });
+            const dedupeKey = `${row.ragioneSociale}|${row.comune}|${row.descrizione}`;
+            if (seen.has(dedupeKey)) continue;
+            seen.add(dedupeKey);
+            await Dataset.pushData(row);
             collected++;
         }
 
-        // Queue next pages from page 1
-        if (pageNum === 1 && totalPages > 1) {
-            const nextPages = [];
-            for (let p = 2; p <= totalPages && collected < maxItems; p++) {
-                nextPages.push({ url: buildUrl(prov, p), userData: { prov, page: p } });
-            }
-            if (nextPages.length) {
-                await addRequests(nextPages);
-                log.info(`Queued ${nextPages.length} more pages`);
-            }
+        if (collected >= maxItems) { log.info('maxItems reached, stopping.'); return; }
+        if (pageNum >= maxPagesPerQuery) { log.info('maxPagesPerQuery reached.'); return; }
+
+        // "Successivo" link carries the next pageToken.
+        let nextHref = null;
+        $('a').each((_, a) => {
+            const txt = $(a).text().trim().toLowerCase();
+            const href = $(a).attr('href');
+            if (txt === 'successivo' && href && href !== '#') nextHref = href;
+        });
+        if (nextHref) {
+            const nextUrl = nextHref.startsWith('http') ? nextHref : `${BASE}${nextHref.startsWith('/') ? '' : '/'}${nextHref}`;
+            await addRequests([{
+                url: nextUrl,
+                userData: { label: 'RESULTS', prov, provName, term, pageNum: pageNum + 1 },
+            }]);
+        } else {
+            log.info(`[${prov || 'IT'}] no "Successivo" — end of results or cap.`);
         }
     },
 
-    failedRequestHandler({ request, log }) { log.error(`Failed: ${request.url}`); },
+    failedRequestHandler({ request, log }) {
+        log.error(`Failed: ${request.url}`);
+    },
 });
 
-await crawler.run(startUrls);
+/**
+ * Parse one results page into listing rows.
+ * NOTE: selectors are best-effort and will be finalized from the dumped HTML
+ * (results_*_p1.html) after the first Apify run. We log candidate selectors so
+ * we immediately see which structure matched.
+ */
+function parseListing($, { prov }) {
+    const out = [];
+
+    // Candidate containers for a single result row.
+    const candidateSelectors = [
+        '[class*="risultat"] [class*="row"]',
+        '[class*="result"] [class*="item"]',
+        'table tbody tr',
+        'li[class*="item"]',
+    ];
+    let chosen = null;
+    for (const sel of candidateSelectors) {
+        if ($(sel).length > 0) { chosen = sel; break; }
+    }
+    if (!chosen) return out;
+
+    $(chosen).each((_, el) => {
+        const cells = $(el).find('td');
+        if (cells.length >= 4) {
+            // Table layout: Nome | Sede | Comune | Forma | Descrizione | Stato
+            const txt = i => $(cells[i]).text().replace(/\s+/g, ' ').trim();
+            const nome = txt(0);
+            if (!nome || nome.length < 2) return;
+            const link = $(el).find('a[href]').attr('href') || '';
+            out.push({
+                ragioneSociale: nome,
+                comune: txt(2),
+                provincia: prov || '',
+                formaGiuridica: txt(3),
+                descrizione: txt(4),
+                stato: txt(5),
+                detailUrl: link.startsWith('http') ? link : (link ? `${BASE}${link}` : ''),
+            });
+        }
+    });
+    return out;
+}
+
+const startRequests = provinces.map(p => ({
+    url: `${BASE}${SEARCH_PATH}`,
+    userData: { label: 'LANDING', prov: p.code, provName: p.name, term: searchTerm, pageNum: 0 },
+    uniqueKey: `landing-${p.code || 'IT'}-${searchTerm}`,
+}));
+
+await crawler.run(startRequests);
 console.log(`Done. Total saved: ${collected} companies.`);
 await Actor.exit();

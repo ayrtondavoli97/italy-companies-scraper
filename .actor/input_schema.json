@@ -1,59 +1,57 @@
 {
-    "title": "Italy Companies Scraper",
+    "title": "Italy Companies Scraper — registroimprese.it (listing)",
     "type": "object",
     "schemaVersion": 1,
     "properties": {
-        "regione": {
-            "title": "Regione",
+        "keyword": {
+            "title": "Termine di ricerca",
             "type": "string",
-            "description": "Regione italiana. Obbligatoria se non si specifica la provincia.",
+            "description": "Ricerca libera: categoria (es. INFORMATICA), nome impresa, o descrizione/codice ATECO. Matcha nome + attività + ATECO.",
+            "editor": "textfield",
+            "default": "INFORMATICA"
+        },
+        "regione": {
+            "title": "Regione (opzionale)",
+            "type": "string",
+            "description": "Espansa in tutte le sue province per segmentare la ricerca e battere il cap risultati.",
             "editor": "select",
             "enum": ["","ABRUZZO","BASILICATA","CALABRIA","CAMPANIA","EMILIA-ROMAGNA","FRIULI-VENEZIA GIULIA","LAZIO","LIGURIA","LOMBARDIA","MARCHE","MOLISE","PIEMONTE","PUGLIA","SARDEGNA","SICILIA","TOSCANA","TRENTINO-ALTO ADIGE","UMBRIA","VALLE D'AOSTA","VENETO"],
-            "enumTitles": ["— nessuna —","Abruzzo","Basilicata","Calabria","Campania","Emilia-Romagna","Friuli-Venezia Giulia","Lazio","Liguria","Lombardia","Marche","Molise","Piemonte","Puglia","Sardegna","Sicilia","Toscana","Trentino-Alto Adige","Umbria","Valle d'Aosta","Veneto"],
+            "enumTitles": ["— nessuna (Tutta Italia) —","Abruzzo","Basilicata","Calabria","Campania","Emilia-Romagna","Friuli-Venezia Giulia","Lazio","Liguria","Lombardia","Marche","Molise","Piemonte","Puglia","Sardegna","Sicilia","Toscana","Trentino-Alto Adige","Umbria","Valle d'Aosta","Veneto"],
             "default": ""
         },
         "provincia": {
             "title": "Provincia (opzionale)",
             "type": "string",
-            "description": "Singola provincia. Nome completo (es. NAPOLI) o sigla (es. NA). Sovrascrive la regione.",
+            "description": "Singola provincia. Nome (es. NAPOLI) o sigla (es. NA). Sovrascrive la regione.",
             "editor": "textfield",
             "default": ""
-        },
-        "ateco": {
-            "title": "Codice ATECO (opzionale)",
-            "type": "string",
-            "description": "Es: '56' per ristorazione, '41' per costruzioni",
-            "editor": "textfield",
-            "default": ""
-        },
-        "formaGiuridica": {
-            "title": "Forma Giuridica (opzionale)",
-            "type": "string",
-            "description": "Es: SRL, SPA, DITTA INDIVIDUALE, SNC, SAS",
-            "editor": "textfield",
-            "default": ""
-        },
-        "statoImpresa": {
-            "title": "Stato impresa",
-            "type": "string",
-            "description": "Filtra per stato",
-            "editor": "select",
-            "enum": ["ATTIVA","INATTIVA","CESSATA",""],
-            "enumTitles": ["Attiva","Inattiva","Cessata","Tutte"],
-            "default": "ATTIVA"
         },
         "maxItems": {
-            "title": "Max risultati",
+            "title": "Max risultati totali",
             "type": "integer",
-            "description": "Numero massimo di aziende da restituire",
+            "description": "Numero massimo di imprese da salvare.",
             "default": 5000,
             "minimum": 1,
             "maximum": 100000
         },
+        "maxPagesPerQuery": {
+            "title": "Max pagine per query",
+            "type": "integer",
+            "description": "Limite di pagine seguite via 'Successivo' per ogni (keyword, provincia). Serve anche a misurare il cap del portale.",
+            "default": 50,
+            "minimum": 1,
+            "maximum": 1000
+        },
+        "debug": {
+            "title": "Debug (dump HTML nel KV Store)",
+            "type": "boolean",
+            "description": "Salva landing e prima pagina risultati nel Key-Value Store per finalizzare i selettori.",
+            "default": true
+        },
         "proxyConfig": {
             "title": "Proxy configuration",
             "type": "object",
-            "description": "Configurazione proxy Apify",
+            "description": "Configurazione proxy Apify.",
             "editor": "proxy",
             "default": { "useApifyProxy": true }
         }
