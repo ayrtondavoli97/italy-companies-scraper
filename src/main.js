@@ -1,11 +1,9 @@
 /**
- * Aziende.it Scraper v10
+ * Aziende.it Scraper v10.1
  *
  * Scrapes Italian company listings from aziende.it by simple business category
  * names or direct category URLs. Optional detail scraping enriches each company
- * with fields discovered on the detail page: VAT number, tax code, REA, legal
- * address, PEC, email, phone, website, legal form, activity status and employees
- * when those values are present in the public HTML.
+ * with fields discovered on the detail page.
  */
 
 import { Actor } from 'apify';
@@ -104,21 +102,14 @@ function asArray(value) {
 }
 
 function resolveCategoryUrls() {
-    const directUrls = asArray(startUrls)
-        .map(u => (typeof u === 'string' ? u : u?.url))
-        .filter(Boolean);
-
-    const categoryNames = [...asArray(category), ...asArray(categories)]
-        .map(normalizeKey)
-        .filter(Boolean);
-
+    const directUrls = asArray(startUrls).map(u => (typeof u === 'string' ? u : u?.url)).filter(Boolean);
+    const categoryNames = [...asArray(category), ...asArray(categories)].map(normalizeKey).filter(Boolean);
     const resolved = [];
+
     for (const name of categoryNames.length ? categoryNames : [DEFAULT_CATEGORY]) {
         if (/^https?:\/\//i.test(name)) {
             resolved.push(name);
-            continue;
-        }
-        if (CATEGORY_PRESETS[name]) {
+        } else if (CATEGORY_PRESETS[name]) {
             resolved.push(...CATEGORY_PRESETS[name]);
         } else {
             console.warn(`Categoria "${name}" non riconosciuta. Uso fallback informatica. Valori supportati: ${Object.keys(CATEGORY_PRESETS).join(', ')}`);
@@ -135,10 +126,7 @@ if (urls.length === 0) {
     await Actor.exit(1);
 }
 
-const proxyConfiguration = proxyConfigInput
-    ? await Actor.createProxyConfiguration(proxyConfigInput)
-    : undefined;
-
+const proxyConfiguration = proxyConfigInput ? await Actor.createProxyConfiguration(proxyConfigInput) : undefined;
 console.log(`Categorie URL: ${urls.length} | maxItems=${maxItems} | maxPagesPerCategory=${maxPagesPerCategory} | includeDetails=${includeDetails}`);
 
 let savedItems = 0;
@@ -173,7 +161,7 @@ function normalizeUrl(href) {
 
 function parseRevenueRange(value) {
     const text = normalizeText(value).toLowerCase();
-    if (!text) return { fatturatoMinEur: null, fatturatoMaxEur: null };
+    if (!text || /non\s+pervenuto/i.test(text)) return { fatturatoMinEur: null, fatturatoMaxEur: null };
     const nums = [...text.matchAll(/\d+(?:[.,]\d+)?/g)].map(m => Number(m[0].replace(',', '.')));
     const mult = text.includes('miliard') ? 1_000_000_000 : text.includes('milion') ? 1_000_000 : 1;
     if (nums.length >= 2) return { fatturatoMinEur: Math.round(nums[0] * mult), fatturatoMaxEur: Math.round(nums[1] * mult) };
@@ -193,7 +181,6 @@ function parseRows($, categoria) {
         const ragioneSociale = normalizeText($a.text());
         if (!ragioneSociale || ragioneSociale.length < 2) return;
         const txt = i => normalizeText($(cols[i]).text());
-        const href = $a.attr('href');
         const fatturato = txt(1);
         out.push({
             ragioneSociale,
@@ -203,7 +190,7 @@ function parseRows($, categoria) {
             provincia: txt(3),
             citta: txt(4),
             categoria,
-            detailUrl: normalizeUrl(href),
+            detailUrl: normalizeUrl($a.attr('href')),
         });
     });
     return out;
@@ -217,7 +204,6 @@ function pickByRegex(text, regex, group = 1) {
 function collectLabelValues($) {
     const pairs = [];
     const selectors = 'tr, li, p, div.row, div[class*="row"], div[class*="col"], dt, dd';
-
     $(selectors).each((_, el) => {
         const $el = $(el);
         const text = normalizeText($el.text());
@@ -237,7 +223,6 @@ function collectLabelValues($) {
             if (value) pairs.push({ label: normalizeKey(text), value });
         }
     });
-
     return pairs;
 }
 
@@ -245,6 +230,50 @@ function findLabel(pairs, labels) {
     const wanted = labels.map(normalizeKey);
     const hit = pairs.find(p => wanted.some(label => p.label === label || p.label.includes(label)));
     return normalizeText(hit?.value ?? '');
+}
+
+function isValidEmail(email) {
+    if (!email) return false;
+    const e = normalizeText(email).toLowerCase();
+    if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(e)) return false;
+    return !/(^|@|\.)aziende\.it$|(^|@|\.)adintend\.com$/i.test(e);
+}
+
+function cleanEmail(value) {
+    const match = normalizeText(value).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    const email = match?.[0] || '';
+    return isValidEmail(email) ? email : null;
+}
+
+function cleanWebsite(value) {
+    const raw = normalizeText(value);
+    if (!raw) return null;
+    try {
+        const u = new URL(raw.startsWith('http') ? raw : `https://${raw}`);
+        const host = u.hostname.replace(/^www\./i, '').toLowerCase();
+        if (host === 'aziende.it' || host.endsWith('.aziende.it') || host === 'adintend.com' || host.endsWith('.adintend.com')) return null;
+        if (['google.com', 'facebook.com', 'linkedin.com', 'instagram.com'].some(d => host === d || host.endsWith(`.${d}`))) return null;
+        return u.toString();
+    } catch {
+        return null;
+    }
+}
+
+function cleanPhone(value, partitaIva = '') {
+    const raw = normalizeText(value);
+    if (!raw) return null;
+    const match = raw.match(/(?:\+39\s*)?(?:0\d{1,4}[\s./-]?\d{5,8}|3\d{2}[\s./-]?\d{6,7})/);
+    if (!match) return null;
+    const phone = normalizeText(match[0]);
+    const digits = phone.replace(/\D/g, '');
+    if (digits.length < 6 || digits.length > 13) return null;
+    if (partitaIva && digits.endsWith(partitaIva.replace(/\D/g, ''))) return null;
+    return phone;
+}
+
+function extractCapFromAddress(indirizzo) {
+    const match = normalizeText(indirizzo).match(/(?:^|[,\s])(\d{5})(?:[,\s]|$)/);
+    return match?.[1] || null;
 }
 
 function parseJsonLd($) {
@@ -257,9 +286,9 @@ function parseJsonLd($) {
             for (const item of items) {
                 if (!item || typeof item !== 'object') continue;
                 if (item.name && !result.ragioneSociale) result.ragioneSociale = normalizeText(item.name);
-                if (item.url && !result.sitoWeb) result.sitoWeb = normalizeText(item.url);
-                if (item.email && !result.email) result.email = normalizeText(item.email);
-                if (item.telephone && !result.telefono) result.telefono = normalizeText(item.telephone);
+                if (item.url && !result.sitoWeb) result.sitoWeb = cleanWebsite(item.url);
+                if (item.email && !result.email) result.email = cleanEmail(item.email);
+                if (item.telephone && !result.telefono) result.telefono = cleanPhone(item.telephone);
                 if (item.address) {
                     const address = typeof item.address === 'string'
                         ? item.address
@@ -278,28 +307,34 @@ function parseDetail($, body) {
     const text = normalizeText(typeof body === 'string' ? body : body.toString());
     const pairs = collectLabelValues($);
     const jsonLd = parseJsonLd($);
-    const emails = [...new Set(text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [])];
-    const pec = emails.find(e => /pec|legalmail|postacert|cert/i.test(e)) || '';
-    const websiteHref = $('a[href^="http"]').map((_, a) => $(a).attr('href')).get()
-        .find(h => h && !h.includes('aziende.it') && !h.includes('google.') && !h.includes('facebook.') && !h.includes('linkedin.')) || '';
 
-    const partitaIva = findLabel(pairs, ['Partita IVA', 'P IVA', 'P.IVA'])
+    const partitaIvaRaw = findLabel(pairs, ['Partita IVA', 'P IVA', 'P.IVA'])
         || pickByRegex(text, /(?:Partita\s*IVA|P\.?\s*IVA)\s*[:\-]?\s*(\d{11})/i);
-    const codiceFiscale = findLabel(pairs, ['Codice fiscale', 'C F', 'C.F.'])
+    const partitaIva = partitaIvaRaw.replace(/\D/g, '').slice(0, 11) || null;
+
+    const codiceFiscaleRaw = findLabel(pairs, ['Codice fiscale', 'C F', 'C.F.'])
         || pickByRegex(text, /(?:Codice\s*fiscale|C\.?\s*F\.?)\s*[:\-]?\s*([A-Z0-9]{11,16})/i);
 
+    const indirizzo = jsonLd.indirizzo || findLabel(pairs, ['Sede legale', 'Indirizzo', 'Sede']) || null;
+    const emails = [...new Set(text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [])].filter(isValidEmail);
+    const pec = emails.find(e => /pec|legalmail|postacert|cert/i.test(e)) || null;
+    const email = jsonLd.email || cleanEmail(findLabel(pairs, ['Email', 'E-mail'])) || emails.find(e => e !== pec) || null;
+
+    const websiteHref = $('a[href^="http"]').map((_, a) => $(a).attr('href')).get().map(cleanWebsite).find(Boolean) || null;
+    const sitoWeb = jsonLd.sitoWeb || cleanWebsite(findLabel(pairs, ['Sito web', 'Website'])) || websiteHref;
+    const telefono = cleanPhone(jsonLd.telefono || findLabel(pairs, ['Telefono', 'Tel']) || pickByRegex(text, /(?:Telefono|Tel\.?)\s*[:\-]?\s*([+]?\d[\d\s()./-]{5,})/i), partitaIva);
+
     return {
-        partitaIva: partitaIva.replace(/\D/g, '').slice(0, 11) || null,
-        codiceFiscale: codiceFiscale || null,
+        partitaIva,
+        codiceFiscale: codiceFiscaleRaw || null,
         rea: findLabel(pairs, ['REA', 'Numero REA', 'Repertorio economico amministrativo'])
             || pickByRegex(text, /(?:\bREA\b|Numero\s*REA)\s*[:\-]?\s*([A-Z]{2}\s*[-/]?\s*\d+|\d{3,})/i) || null,
-        indirizzo: jsonLd.indirizzo || findLabel(pairs, ['Sede legale', 'Indirizzo', 'Sede']) || null,
-        cap: findLabel(pairs, ['CAP']) || pickByRegex(text, /\b(\d{5})\b/) || null,
-        telefono: jsonLd.telefono || findLabel(pairs, ['Telefono', 'Tel'])
-            || pickByRegex(text, /(?:Telefono|Tel\.?)\s*[:\-]?\s*([+]?\d[\d\s()./-]{5,})/i) || null,
-        email: jsonLd.email || findLabel(pairs, ['Email', 'E-mail']) || emails.find(e => e !== pec) || null,
-        pec: findLabel(pairs, ['PEC', 'Posta elettronica certificata']) || pec || null,
-        sitoWeb: jsonLd.sitoWeb || findLabel(pairs, ['Sito web', 'Website']) || websiteHref || null,
+        indirizzo,
+        cap: extractCapFromAddress(indirizzo),
+        telefono,
+        email,
+        pec,
+        sitoWeb,
         formaGiuridica: findLabel(pairs, ['Forma giuridica', 'Natura giuridica']) || null,
         statoAttivita: findLabel(pairs, ['Stato attivita', 'Stato attività', 'Stato']) || null,
         dipendenti: findLabel(pairs, ['Dipendenti', 'Numero dipendenti', 'Addetti']) || null,
@@ -316,7 +351,7 @@ async function pushCompany(record) {
 const crawler = new CheerioCrawler({
     proxyConfiguration,
     useSessionPool: true,
-    maxConcurrency: includeDetails ? 8 : 4,
+    maxConcurrency: includeDetails ? 6 : 4,
     maxRequestRetries: 3,
     requestHandlerTimeoutSecs: 60,
     additionalMimeTypes: ['text/html'],
@@ -326,7 +361,7 @@ const crawler = new CheerioCrawler({
                 ...request.headers,
                 'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/10.0; +https://apify.com/)'
+                'User-Agent': 'Mozilla/5.0 (compatible; ItalyCompaniesScraper/10.1; +https://apify.com/)'
             };
         },
     ],
