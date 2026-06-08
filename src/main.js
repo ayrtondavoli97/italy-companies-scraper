@@ -29,6 +29,7 @@
 
 import { Actor } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
+import { load } from 'cheerio';
 
 const BASE = 'https://www.registroimprese.it';
 const SEARCH_PATH = '/ricerca-libera-e-acquisto';
@@ -130,7 +131,7 @@ const crawler = new CheerioCrawler({
     proxyConfiguration,
     useSessionPool: true,
     persistCookiesPerSession: true,
-    maxConcurrency: 2,
+    maxConcurrency: 1,
     requestHandlerTimeoutSecs: 60,
     maxRequestRetries: 3,
     additionalMimeTypes: ['text/html'],
@@ -144,110 +145,115 @@ const crawler = new CheerioCrawler({
         },
     ],
 
-    async requestHandler({ $, request, body, log, addRequests }) {
-        const { label, prov, provName, term, pageNum } = request.userData;
+    async requestHandler({ $, request, log, sendRequest }) {
+        const { prov, provName, term } = request.userData;
 
-        // ---- LANDING: read the desktop searchForm and POST it -------------
-        if (label === 'LANDING') {
-            const html = typeof body === 'string' ? body : body.toString();
-            if (debug) {
-                await Actor.setValue(`landing_${prov || 'IT'}.html`, html, { contentType: 'text/html; charset=utf-8' });
-            }
+        // (1) Landing already fetched as $ (GET, same session below).
+        if (debug) {
+            await Actor.setValue(`landing_${prov || 'IT'}.html`, $.html(), { contentType: 'text/html; charset=utf-8' });
+        }
 
-            // Desktop form (name ends with _searchForm, not _searchFormMob).
-            let $form = $('form[name$="_searchForm"]').first();
-            if ($form.length === 0) $form = $('form[name$="_searchFormMob"]').first();
-            if ($form.length === 0) {
-                log.error(`[${prov || 'IT'}] searchForm not found on landing — site layout changed.`);
-                return;
-            }
+        // (2) Read the desktop searchForm: action(+p_auth), namespace, fields.
+        let $form = $('form[name$="_searchForm"]').first();
+        if ($form.length === 0) $form = $('form[name$="_searchFormMob"]').first();
+        if ($form.length === 0) { log.error(`[${prov || 'IT'}] searchForm not found.`); return; }
 
-            const action = ($form.attr('action') || '').replace(/&amp;/g, '&');
-            const ns = $form.attr('data-fm-namespace') || NS;
-            const pAuth = (action.match(/[?&]p_auth=([^&]+)/) || [])[1] || null;
+        const action = ($form.attr('action') || '').replace(/&amp;/g, '&');
+        const ns = $form.attr('data-fm-namespace') || NS;
+        const payload = new URLSearchParams();
+        $form.find('input, select, textarea').each((_, el) => {
+            const name = $(el).attr('name');
+            if (name) payload.set(name, $(el).attr('value') || '');
+        });
+        payload.set(`${ns}inputSearchField`, term);
+        payload.set(`${ns}filtroInputSearchField`, term);
+        payload.set(`${ns}filtroProvincia`, prov || ''); // '' = Tutta Italia
+        payload.set(`${ns}soloNonCancellate`, 'S');
+        payload.set(`${ns}filtroScore`, 'S');
+        payload.set(`${ns}captchaResp`, '');
 
-            // Carry over every hidden/text field exactly as the page set them.
-            const payload = new URLSearchParams();
-            $form.find('input, select, textarea').each((_, el) => {
-                const name = $(el).attr('name');
-                if (!name) return;
-                payload.set(name, $(el).attr('value') || '');
+        const navHeaders = {
+            'content-type': 'application/x-www-form-urlencoded',
+            'referer': `${BASE}${SEARCH_PATH}`,
+            'origin': BASE,
+            'cache-control': 'max-age=0',
+            'upgrade-insecure-requests': '1',
+            'sec-fetch-dest': 'document',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'same-origin',
+            'sec-fetch-user': '?1',
+        };
+        log.info(`[${prov || 'IT'}] POST search term="${term}" fields=${[...payload.keys()].length}`);
+
+        // (3) POST in the SAME session as the landing GET (shared cookie jar),
+        //     so the per-session p_auth stays valid. Don't throw on 4xx so we
+        //     can capture the block page.
+        let resp;
+        try {
+            resp = await sendRequest({
+                url: action, method: 'POST', headers: navHeaders,
+                body: payload.toString(), throwHttpErrors: false, followRedirect: true,
             });
-            // Overrides: the search term + province (code) + flags.
-            payload.set(`${ns}inputSearchField`, term);
-            payload.set(`${ns}filtroInputSearchField`, term);
-            payload.set(`${ns}filtroProvincia`, prov || ''); // '' = Tutta Italia
-            payload.set(`${ns}soloNonCancellate`, 'S');
-            payload.set(`${ns}filtroScore`, 'S');
-            payload.set(`${ns}captchaResp`, ''); // reCAPTCHA v3 — empty, see header note
+        } catch (e) { log.error(`[${prov || 'IT'}] POST error: ${e.message}`); return; }
 
-            log.info(`[${prov || 'IT'}] POST search term="${term}" p_auth=${pAuth ? 'ok' : 'MISSING'} fields=${[...payload.keys()].length}`);
+        let html = typeof resp.body === 'string' ? resp.body : String(resp.body);
+        log.info(`[${prov || 'IT'}] POST status=${resp.statusCode} finalUrl=${resp.url || action} bodyLen=${html.length}`);
+        if (debug) await Actor.setValue(`post_response_${prov || 'IT'}.html`, html, { contentType: 'text/html; charset=utf-8' });
 
-            await addRequests([{
-                url: action,
-                method: 'POST',
-                payload: payload.toString(),
-                headers: {
-                    'content-type': 'application/x-www-form-urlencoded',
-                    'referer': `${BASE}${SEARCH_PATH}`,
-                    'origin': BASE,
-                },
-                userData: { label: 'RESULTS', prov, provName, term, pageNum: 1 },
-                uniqueKey: `search-${prov || 'IT'}-${term}-${Date.now()}`,
-            }]);
+        if (resp.statusCode >= 400) {
+            log.warning(`[${prov || 'IT'}] BLOCKED status=${resp.statusCode}. Inspect post_response_${prov || 'IT'}.html (WAF? Liferay auth? captcha?).`);
             return;
         }
 
-        // ---- RESULTS: parse listing rows + follow "Successivo" ------------
-        const html = typeof body === 'string' ? body : body.toString();
-        if (debug && pageNum === 1) {
-            await Actor.setValue(`results_${prov || 'IT'}_p1.html`, html, { contentType: 'text/html; charset=utf-8' });
-        }
-
-        // Diagnostics: did the search actually execute, or did we get the form back?
-        const executed = /hai cercato/i.test(html) || /risultati/i.test($('body').text());
-        const looksLikeForm = $('form[name$="_searchForm"]').length > 0 && !/hai cercato/i.test(html);
-        if (pageNum === 1) {
-            log.info(`[${prov || 'IT'}] results page: executed=${executed} looksLikeForm=${looksLikeForm} finalUrl=${request.loadedUrl || request.url}`);
-            if (looksLikeForm) {
-                log.warning(`[${prov || 'IT'}] got the form back, not results — likely reCAPTCHA v3 block or rejected POST. Inspect results_${prov || 'IT'}_p1.html.`);
+        // (4) Parse + paginate via sendRequest in the SAME session.
+        let pageNum = 1;
+        while (true) {
+            const $$ = load(html);
+            if (debug && pageNum === 1) {
+                await Actor.setValue(`results_${prov || 'IT'}_p1.html`, html, { contentType: 'text/html; charset=utf-8' });
             }
-        }
+            const executed = /hai cercato/i.test(html);
+            const looksLikeForm = $$('form[name$="_searchForm"]').length > 0 && !executed;
+            if (pageNum === 1) log.info(`[${prov || 'IT'}] results: executed=${executed} looksLikeForm=${looksLikeForm}`);
 
-        const rows = parseListing($, { prov });
-        log.info(`[${prov || 'IT'}] page ${pageNum}: parsed ${rows.length} rows (total ${collected})`);
+            const rows = parseListing($$, { prov });
+            log.info(`[${prov || 'IT'}] page ${pageNum}: parsed ${rows.length} rows (total ${collected})`);
+            for (const row of rows) {
+                if (collected >= maxItems) break;
+                const k = `${row.ragioneSociale}|${row.comune}|${row.descrizione}`;
+                if (seen.has(k)) continue;
+                seen.add(k);
+                await Dataset.pushData(row);
+                collected++;
+            }
+            if (collected >= maxItems) { log.info('maxItems reached.'); break; }
+            if (pageNum >= maxPagesPerQuery) { log.info('maxPagesPerQuery reached.'); break; }
 
-        for (const row of rows) {
-            if (collected >= maxItems) break;
-            const dedupeKey = `${row.ragioneSociale}|${row.comune}|${row.descrizione}`;
-            if (seen.has(dedupeKey)) continue;
-            seen.add(dedupeKey);
-            await Dataset.pushData(row);
-            collected++;
-        }
+            let nextHref = null;
+            $$('a').each((_, a) => {
+                const t = $$(a).text().trim().toLowerCase();
+                const h = $$(a).attr('href');
+                if (t === 'successivo' && h && h !== '#') nextHref = h;
+            });
+            if (!nextHref) { log.info(`[${prov || 'IT'}] no "Successivo" — end of results or cap.`); break; }
 
-        if (collected >= maxItems) { log.info('maxItems reached, stopping.'); return; }
-        if (pageNum >= maxPagesPerQuery) { log.info('maxPagesPerQuery reached.'); return; }
-
-        // "Successivo" link carries the next pageToken.
-        let nextHref = null;
-        $('a').each((_, a) => {
-            const txt = $(a).text().trim().toLowerCase();
-            const href = $(a).attr('href');
-            if (txt === 'successivo' && href && href !== '#') nextHref = href;
-        });
-        if (nextHref) {
             const nextUrl = nextHref.startsWith('http') ? nextHref : `${BASE}${nextHref.startsWith('/') ? '' : '/'}${nextHref}`;
-            await addRequests([{
-                url: nextUrl,
-                userData: { label: 'RESULTS', prov, provName, term, pageNum: pageNum + 1 },
-            }]);
-        } else {
-            log.info(`[${prov || 'IT'}] no "Successivo" — end of results or cap.`);
+            let r2;
+            try {
+                r2 = await sendRequest({
+                    url: nextUrl,
+                    headers: { 'referer': resp.url || `${BASE}${SEARCH_PATH}`, 'upgrade-insecure-requests': '1', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' },
+                    throwHttpErrors: false,
+                });
+            } catch (e) { log.warning(`[${prov || 'IT'}] pagination error: ${e.message}`); break; }
+            if (r2.statusCode >= 400) { log.warning(`[${prov || 'IT'}] pagination BLOCKED status=${r2.statusCode}.`); break; }
+            html = typeof r2.body === 'string' ? r2.body : String(r2.body);
+            pageNum++;
+            await new Promise(r => setTimeout(r, 800));
         }
     },
 
-    failedRequestHandler({ request, log }) {
+        failedRequestHandler({ request, log }) {
         log.error(`Failed: ${request.url}`);
     },
 });
