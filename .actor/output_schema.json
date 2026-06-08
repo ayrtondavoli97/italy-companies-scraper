@@ -7,7 +7,6 @@
             "type": "string",
             "title": "Companies",
             "description": "Extracted Italian company records.",
-            "resourceType": "dataset",
             "template": "{{links.apiDefaultDatasetUrl}}/items?view=overview"
         }
     }
